@@ -17,7 +17,7 @@ import (
 	"github.com/phires/go-guerrilla/response"
 )
 
-// Test Starting smtp without setting up logger / backend
+// Test Starting smtp without setting up logger / getBackend
 func TestSMTP(t *testing.T) {
 	done := make(chan bool)
 	go func() {
@@ -92,7 +92,7 @@ func TestSMTPCustomServer(t *testing.T) {
 
 }
 
-// with a backend config
+// with a getBackend config
 func TestSMTPCustomBackend(t *testing.T) {
 	cfg := &AppConfig{LogFile: log.OutputOff.String()}
 	sc := ServerConfig{
@@ -435,7 +435,7 @@ var funkyLogger = func() backends.Decorator {
 						e.RcptTo[len(e.RcptTo)-1])
 					// if valid then forward call to the next processor in the chain
 					return p.Process(e, task)
-					// if invalid, return a backend result
+					// if invalid, return a getBackend result
 					//return backends.NewResult(response.Canned.FailRcptCmd), nil
 				} else if task == backends.TaskSaveMail {
 					backends.Log().Info("Another funky email!")
@@ -562,7 +562,7 @@ func talkToServer(address string) (err error) {
 }
 
 // Test hot config reload
-// Here we forgot to add FunkyLogger so backend will fail to init
+// Here we forgot to add FunkyLogger so getBackend will fail to init
 // it will log to stderr at the beginning, but then change to tests/testlog
 
 func TestReloadConfig(t *testing.T) {
@@ -734,7 +734,7 @@ var customBackend2 = func() backends.Decorator {
 	}
 }
 
-// Test a custom backend response
+// Test a custom getBackend response
 func TestCustomBackendResult(t *testing.T) {
 	if err := os.Truncate("tests/testlog", 0); err != nil {
 		t.Error(err)

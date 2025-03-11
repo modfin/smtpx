@@ -4,8 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"crypto/md5" //#nosec G501 - Deprecated, kept for backwards compatibility
-	"fmt"
-	"io"
+	"encoding/hex"
 	"net/textproto"
 	"regexp"
 	"strings"
@@ -53,14 +52,11 @@ func ParseHeaders(mailData string) map[string]string {
 // - string: The hexadecimal representation of the MD5 hash.
 // Deprecated: use BLAKE128s128Hex instead
 func MD5Hex(stringArguments ...string) string {
-	h := md5.New() //#nosec G401 - Deprecated, kept for backwards compatibility
-	var r *strings.Reader
+	h := md5.New()
 	for i := 0; i < len(stringArguments); i++ {
-		r = strings.NewReader(stringArguments[i])
-		_, _ = io.Copy(h, r)
+		h.Write([]byte(stringArguments[i]))
 	}
-	sum := h.Sum([]byte{})
-	return fmt.Sprintf("%x", sum)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // BLAKE2s128Hex generates a Blake2s-128 hash as a string of hex characters from the given string arguments.
@@ -79,16 +75,13 @@ func BLAKE2s128Hex(stringArguments ...string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var r *strings.Reader
 	for i := 0; i < len(stringArguments); i++ {
-		r = strings.NewReader(stringArguments[i])
-		_, err := io.Copy(h, r)
+		_, err = h.Write([]byte(stringArguments[i]))
 		if err != nil {
 			return "", err
 		}
 	}
-	sum := h.Sum([]byte{})
-	return fmt.Sprintf("%x", sum), nil
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Compress concatenates and compresses all the strings passed in using zlib.
@@ -100,11 +93,9 @@ func BLAKE2s128Hex(stringArguments ...string) (string, error) {
 // - string: The compressed string.
 func Compress(stringArguments ...string) string {
 	var b bytes.Buffer
-	var r *strings.Reader
 	w, _ := zlib.NewWriterLevel(&b, zlib.BestSpeed)
 	for i := 0; i < len(stringArguments); i++ {
-		r = strings.NewReader(stringArguments[i])
-		_, _ = io.Copy(w, r)
+		_, _ = w.Write([]byte(stringArguments[i]))
 	}
 	_ = w.Close()
 	return b.String()

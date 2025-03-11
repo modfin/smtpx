@@ -16,20 +16,16 @@ import (
 var (
 	Svc *service
 
-	// Store the constructor for making an new processor decorator.
-	processors map[string]ProcessorConstructor
-
 	b Backend
 )
 
 func init() {
 	Svc = &service{}
-	processors = make(map[string]ProcessorConstructor)
 }
 
 type ProcessorConstructor func() Decorator
 
-// Backends process received mail. Depending on the implementation, they can store mail in the database,
+// Backend is process received mail. Depending on the implementation, they can store mail in the database,
 // write to a file, check for spam, re-transmit to another server, etc.
 // Must return an SMTP message (i.e. "250 OK") and a boolean indicating
 // whether the message was processed successfully.
@@ -78,7 +74,7 @@ func (r *result) String() string {
 	return r.Buffer.String()
 }
 
-// Parses the SMTP code from the first 3 characters of the SMTP message.
+// Code Parses the SMTP code from the first 3 characters of the SMTP message.
 // Returns 554 if code cannot be parsed.
 func (r *result) Code() int {
 	trimmed := strings.TrimSpace(r.String())
@@ -225,20 +221,6 @@ func (s *service) shutdown() Errors {
 	}
 	s.shutdowners = failed
 	return errors
-}
-
-// AddProcessor adds a new processor, which becomes available to the backend_config.save_process option
-// and also the backend_config.validate_process option
-// Use to add your own custom processor when using backends as a package, or after importing an external
-// processor.
-func (s *service) AddProcessor(name string, p ProcessorConstructor) {
-	// wrap in a constructor since we want to defer calling it
-	var c ProcessorConstructor
-	c = func() Decorator {
-		return p()
-	}
-	// add to our processors list
-	processors[strings.ToLower(name)] = c
 }
 
 // extractConfig loads the backend config. It has already been unmarshalled

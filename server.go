@@ -2,23 +2,18 @@ package guerrilla
 
 import (
 	"bytes"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/sirupsen/logrus"
-
 	"github.com/phires/go-guerrilla/backends"
-	"github.com/phires/go-guerrilla/log"
 	"github.com/phires/go-guerrilla/mail"
 	"github.com/phires/go-guerrilla/mail/rfc5321"
 	"github.com/phires/go-guerrilla/response"
@@ -44,7 +39,7 @@ const (
 
 // Server listens for SMTP clients on the port specified in its config
 type server struct {
-	configStore     atomic.Value // stores guerrilla.ServerConfig
+	serverConfig    *ServerConfig // stores guerrilla.ServerConfig
 	tlsConfigStore  atomic.Value
 	timeout         atomic.Value // stores time.Duration
 	listenInterface string
@@ -54,11 +49,11 @@ type server struct {
 	closedListener  chan bool
 	hosts           allowedHosts // stores map[string]bool for faster lookup
 	state           int
-	// If log changed after a config reload, newLogStore stores the value here until it's safe to change it
-	logStore     atomic.Value
-	mainlogStore atomic.Value
-	backendStore atomic.Value
+
+	backend      backends.Backend
 	envelopePool *mail.Pool
+
+	logger *slog.Logger
 }
 
 type allowedHosts struct {
@@ -89,112 +84,6 @@ func (c command) match(in []byte) bool {
 	return bytes.Index(in, []byte(c)) == 0
 }
 
-// Creates and returns a new ready-to-run Server from a ServerConfig configuration
-func newServer(sc *ServerConfig, b backends.Backend, mainlog log.Logger) (*server, error) {
-	server := &server{
-		clientPool:      NewPool(sc.MaxClients),
-		closedListener:  make(chan bool, 1),
-		listenInterface: sc.ListenInterface,
-		state:           ServerStateNew,
-		envelopePool:    mail.NewPool(sc.MaxClients),
-	}
-	server.mainlogStore.Store(mainlog)
-	server.backendStore.Store(b)
-	if sc.LogFile == "" {
-		// none set, use the mainlog for the server log
-		server.logStore.Store(mainlog)
-		server.log().Info("server [" + sc.ListenInterface + "] did not configure a separate log file, so using the main log")
-	} else {
-		// set level to same level as mainlog level
-		if l, logOpenError := log.GetLogger(sc.LogFile, server.mainlog().GetLevel()); logOpenError != nil {
-			server.log().WithError(logOpenError).Errorf("Failed creating a logger for server [%s]", sc.ListenInterface)
-			return server, logOpenError
-		} else {
-			server.logStore.Store(l)
-		}
-	}
-	server.setConfig(sc)
-	server.setTimeout(sc.Timeout)
-	if err := server.configureTLS(); err != nil {
-		return server, err
-	}
-	return server, nil
-}
-
-func (s *server) configureTLS() error {
-	sConfig := s.configStore.Load().(ServerConfig)
-	if sConfig.TLS.AlwaysOn || sConfig.TLS.StartTLSOn {
-		cert, err := tls.LoadX509KeyPair(sConfig.TLS.PublicKeyFile, sConfig.TLS.PrivateKeyFile)
-		if err != nil {
-			return fmt.Errorf("error while loading the certificate: %s", err)
-		}
-		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			ClientAuth:   tls.VerifyClientCertIfGiven,
-			ServerName:   sConfig.Hostname,
-			MinVersion:   tls.VersionTLS10, // #nosec G402 -- we need to keep at least TLS1.0 for backward compatibility
-		}
-		if len(sConfig.TLS.Protocols) > 0 {
-			if min, ok := TLSProtocols[sConfig.TLS.Protocols[0]]; ok {
-				tlsConfig.MinVersion = min
-			}
-		}
-		if len(sConfig.TLS.Protocols) > 1 {
-			if max, ok := TLSProtocols[sConfig.TLS.Protocols[1]]; ok {
-				tlsConfig.MaxVersion = max
-			}
-		}
-		if len(sConfig.TLS.Ciphers) > 0 {
-			for _, val := range sConfig.TLS.Ciphers {
-				if c, ok := TLSCiphers[val]; ok {
-					tlsConfig.CipherSuites = append(tlsConfig.CipherSuites, c)
-				}
-			}
-		}
-		if len(sConfig.TLS.Curves) > 0 {
-			for _, val := range sConfig.TLS.Curves {
-				if c, ok := TLSCurves[val]; ok {
-					tlsConfig.CurvePreferences = append(tlsConfig.CurvePreferences, c)
-				}
-			}
-		}
-		if len(sConfig.TLS.RootCAs) > 0 {
-			caCert, err := os.ReadFile(sConfig.TLS.RootCAs)
-			if err != nil {
-				s.log().WithError(err).Errorf("failed opening TLSRootCAs file [%s]", sConfig.TLS.RootCAs)
-			} else {
-				caCertPool := x509.NewCertPool()
-				caCertPool.AppendCertsFromPEM(caCert)
-				tlsConfig.RootCAs = caCertPool
-			}
-
-		}
-		if len(sConfig.TLS.ClientAuthType) > 0 {
-			if ca, ok := TLSClientAuthTypes[sConfig.TLS.ClientAuthType]; ok {
-				tlsConfig.ClientAuth = ca
-			}
-		}
-		// Deprecated TLS 1.3
-		//tlsConfig.PreferServerCipherSuites = sConfig.TLS.PreferServerCipherSuites
-		tlsConfig.Rand = rand.Reader
-		s.tlsConfigStore.Store(tlsConfig)
-	}
-	return nil
-}
-
-// setBackend sets the backend to use for processing email envelopes
-func (s *server) setBackend(b backends.Backend) {
-	s.backendStore.Store(b)
-}
-
-// backend gets the backend used to process email envelopes
-func (s *server) backend() backends.Backend {
-	if b, ok := s.backendStore.Load().(backends.Backend); ok {
-		return b
-	}
-	return nil
-}
-
 // Set the timeout for the server and all clients
 func (s *server) setTimeout(seconds int) {
 	duration := time.Duration(int64(seconds))
@@ -204,13 +93,7 @@ func (s *server) setTimeout(seconds int) {
 
 // goroutine safe config store
 func (s *server) setConfig(sc *ServerConfig) {
-	s.configStore.Store(*sc)
-}
-
-// goroutine safe
-func (s *server) isEnabled() bool {
-	sc := s.configStore.Load().(ServerConfig)
-	return sc.IsEnabled
+	s.serverConfig = sc
 }
 
 // Set the allowed hosts for the server
@@ -234,38 +117,36 @@ func (s *server) setAllowedHosts(allowedHosts []string) {
 }
 
 // Begin accepting SMTP clients. Will block unless there is an error or server.Shutdown() is called
-func (s *server) Start(startWG *sync.WaitGroup) error {
+func (s *server) Start() error {
 	var clientID uint64
 	clientID = 0
 
 	listener, err := net.Listen("tcp", s.listenInterface)
 	s.listener = listener
 	if err != nil {
-		startWG.Done() // don't wait for me
 		s.state = ServerStateStartError
 		return fmt.Errorf("[%s] Cannot listen on port: %s ", s.listenInterface, err.Error())
 	}
 
-	s.log().Infof("Listening on TCP %s", s.listenInterface)
+	s.log().Info("Listening on TCP", "interface", s.listenInterface)
 	s.state = ServerStateRunning
-	startWG.Done() // start successful, don't wait for me
 
 	for {
-		s.log().Debugf("[%s] Waiting for a new client. Next Client ID: %d", s.listenInterface, clientID+1)
+		s.log().With("interface", s.listenInterface).Debug("Waiting for a new client", "next_client_id", clientID+1)
 		conn, err := listener.Accept()
 		clientID++
 		if err != nil {
 			if e, ok := err.(net.Error); ok && !e.Temporary() {
-				s.log().Infof("Server [%s] has stopped accepting new clients", s.listenInterface)
+				s.log().With("interface", s.listenInterface).Info("Server has stopped accepting new clients")
 				// the listener has been closed, wait for clients to exit
-				s.log().Infof("shutting down pool [%s]", s.listenInterface)
+				s.log().With("interface", s.listenInterface).Info("shutting down pool")
 				s.clientPool.ShutdownState()
 				s.clientPool.ShutdownWait()
 				s.state = ServerStateStopped
 				s.closedListener <- true
 				return nil
 			}
-			s.mainlog().WithError(err).Info("Temporary error accepting client")
+			s.log().Info("Temporary error accepting client", "err", err)
 			continue
 		}
 		go func(p Poolable, borrowErr error) {
@@ -275,7 +156,7 @@ func (s *server) Start(startWG *sync.WaitGroup) error {
 				s.envelopePool.Return(c.Envelope)
 				s.clientPool.Return(c)
 			} else {
-				s.log().WithError(borrowErr).Info("couldn't borrow a new client")
+				s.log().Info("couldn't borrow a new client", "err", borrowErr)
 				// we could not get a client, so close the connection.
 				_ = conn.Close()
 
@@ -367,12 +248,12 @@ func (s *server) isShuttingDown() bool {
 // Handles an entire client SMTP exchange
 func (s *server) handleClient(client *client) {
 	defer client.closeConn()
-	sc := s.configStore.Load().(ServerConfig)
-	s.log().Infof("Handle client [%s], id: %d", client.RemoteIP, client.ID)
+	sc := s.serverConfig
+	s.log().Info("Handle client", "ip", client.RemoteIP, "id", client.ID)
 
 	// Initial greeting
-	greeting := fmt.Sprintf("220 %s SMTP Guerrilla(%s) #%d (%d) %s",
-		sc.Hostname, Version, client.ID,
+	greeting := fmt.Sprintf("220 %s SMTP %s(%s) #%d (%d) %s",
+		sc.Hostname, Name, Version, client.ID,
 		s.clientPool.GetActiveClientsCount(), time.Now().Format(time.RFC3339))
 
 	helo := fmt.Sprintf("250 %s Hello", sc.Hostname)
@@ -391,11 +272,11 @@ func (s *server) handleClient(client *client) {
 	if sc.TLS.AlwaysOn {
 		tlsConfig, ok := s.tlsConfigStore.Load().(*tls.Config)
 		if !ok {
-			s.mainlog().Error("Failed to load *tls.Config")
+			s.log().Error("Failed to load *tls.Config")
 		} else if err := client.upgradeToTLS(tlsConfig); err == nil {
 			advertiseTLS = ""
 		} else {
-			s.log().WithError(err).Warnf("[%s] Failed TLS handshake", client.RemoteIP)
+			s.log().Warn("Failed TLS handshake", "ip", client.RemoteIP, "err", err)
 			// server requires TLS, but can't handshake
 			client.kill()
 		}
@@ -413,19 +294,19 @@ func (s *server) handleClient(client *client) {
 		case ClientCmd:
 			client.bufin.setLimit(CommandLineMaxLength)
 			input, err := s.readCommand(client)
-			s.log().Debugf("Client sent: %s", input)
+			s.log().Debug("Client sent:", "command", input)
 			if err == io.EOF {
-				s.log().WithError(err).Warnf("Client closed the connection: %s", client.RemoteIP)
+				s.log().Warn("Client closed the connection", "ip", client.RemoteIP, "err", err)
 				return
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				s.log().WithError(err).Warnf("Timeout: %s", client.RemoteIP)
+				s.log().Warn("Timeout", "ip", client.RemoteIP, "err", err)
 				return
 			} else if err == LineLimitExceeded {
 				client.sendResponse(r.FailLineTooLong)
 				client.kill()
 				break
 			} else if err != nil {
-				s.log().WithError(err).Warnf("Read error: %s", client.RemoteIP)
+				s.log().Warn("Read error", "ip", client.RemoteIP, "err", err)
 				client.kill()
 				break
 			}
@@ -444,7 +325,7 @@ func (s *server) handleClient(client *client) {
 				if h, err := client.parser.Helo(input[4:]); err == nil {
 					client.Helo = h
 				} else {
-					s.log().WithFields(logrus.Fields{"helo": h, "client": client.ID}).Warn("invalid helo")
+					s.log().Warn("invalid helo", "helo", h, "client", client.ID)
 					client.sendResponse(r.FailSyntaxError)
 					break
 				}
@@ -456,7 +337,7 @@ func (s *server) handleClient(client *client) {
 					client.Helo = h
 				} else {
 					client.sendResponse(r.FailSyntaxError)
-					s.log().WithFields(logrus.Fields{"ehlo": h, "client": client.ID}).Warn("invalid ehlo")
+					s.log().Warn("invalid ehlo", "ehlo", h, "client", client.ID)
 					client.sendResponse(r.FailSyntaxError)
 					break
 				}
@@ -494,14 +375,14 @@ func (s *server) handleClient(client *client) {
 
 			case sc.ProxyOn && cmdPROXY.match(cmd):
 				if toks := bytes.Split(input[6:], []byte{' '}); len(toks) == 5 {
-					s.log().Debugf("PROXY command. Proto: [%s] Source IP: [%s] Dest IP: [%s] Source Port: [%s] Dest Port: [%s]", toks[0], toks[1], toks[2], toks[3], toks[4])
+					s.log().Debug("PROXY command.", "proto", toks[0], "source_ip", toks[1], "dest_ip", toks[2], "source_port", toks[3], "dest_port", toks[4])
 					client.RemoteIP = string(toks[1])
-					s.log().Debugf("client.RemoteIP: [%s]", client.RemoteIP)
+					s.log().Debug("client.RemoteIP ", "ip", client.RemoteIP)
 					// There is RfC or anything about the PROXY command,
 					// so it is unclear, if a response is required.
 					//client.sendResponse(r.SuccessMailCmd)
 				} else {
-					s.log().Error("PROXY parse error", "["+string(input[6:])+"]")
+					s.log().Error("PROXY parse error", "data", "["+string(input[6:])+"]")
 					client.sendResponse(r.FailSyntaxError)
 				}
 
@@ -512,7 +393,7 @@ func (s *server) handleClient(client *client) {
 				}
 				client.MailFrom, err = client.parsePath(input[10:], client.parser.MailFrom)
 				if err != nil {
-					s.log().WithError(err).Error("MAIL parse error", "["+string(input[10:])+"]")
+					s.log().Error("MAIL parse error", "data", "["+string(input[10:])+"]", "err", err)
 					client.sendResponse(err)
 					break
 				} else if client.parser.NullPath {
@@ -528,7 +409,7 @@ func (s *server) handleClient(client *client) {
 				}
 				to, err := client.parsePath(input[8:], client.parser.RcptTo)
 				if err != nil {
-					s.log().WithError(err).Error("RCPT parse error", "["+string(input[8:])+"]")
+					s.log().Error("RCPT parse error", "data", "["+string(input[8:])+"]", "err", err)
 					client.sendResponse(err.Error())
 					break
 				}
@@ -537,7 +418,7 @@ func (s *server) handleClient(client *client) {
 					client.sendResponse(r.ErrorRelayDenied, " ", to.Host)
 				} else {
 					client.PushRcpt(to)
-					rcptError := s.backend().ValidateRcpt(client.Envelope)
+					rcptError := s.backend.ValidateRcpt(client.Envelope)
 					if rcptError != nil {
 						client.PopRcpt()
 						client.sendResponse(r.FailRcptCmd, " ", rcptError.Error())
@@ -603,12 +484,12 @@ func (s *server) handleClient(client *client) {
 					client.sendResponse(r.FailReadErrorDataCmd, " ", err.Error())
 					client.kill()
 				}
-				s.log().WithError(err).Warn("Error reading data")
+				s.log().Warn("Error reading data", "ip", client.RemoteIP, "err", err)
 				client.resetTransaction()
 				break
 			}
 
-			res := s.backend().Process(client.Envelope)
+			res := s.backend.Process(client.Envelope)
 			if res.Code() < 300 {
 				client.messagesSent++
 			}
@@ -623,12 +504,12 @@ func (s *server) handleClient(client *client) {
 			if !client.TLS && sc.TLS.StartTLSOn {
 				tlsConfig, ok := s.tlsConfigStore.Load().(*tls.Config)
 				if !ok {
-					s.mainlog().Error("Failed to load *tls.Config")
+					s.log().Error("Failed to load *tls.Config")
 				} else if err := client.upgradeToTLS(tlsConfig); err == nil {
 					advertiseTLS = ""
 					client.resetTransaction()
 				} else {
-					s.log().WithError(err).Warnf("[%s] Failed TLS handshake", client.RemoteIP)
+					s.log().Warn("Failed TLS handshake", "ip", client.RemoteIP, "err", err)
 					// Don't disconnect, let the client decide if it wants to continue
 				}
 			}
@@ -641,17 +522,17 @@ func (s *server) handleClient(client *client) {
 		}
 
 		if client.bufErr != nil {
-			s.log().WithError(client.bufErr).Debug("client could not buffer a response")
+			s.log().Debug("client could not buffer a response", "err", client.bufErr)
 			return
 		}
 		// flush the response buffer
 		if client.bufout.Buffered() > 0 {
-			if s.log().IsDebug() {
-				s.log().Debugf("Writing response to client: \n%s", client.response.String())
-			}
+
+			s.log().Debug(fmt.Sprintf("Writing response to client: %s", client.response.String()))
+
 			err := s.flushResponse(client)
 			if err != nil {
-				s.log().WithError(err).Debug("error writing response")
+				s.log().Debug("error writing response", "err", err)
 				return
 			}
 		}
@@ -659,43 +540,40 @@ func (s *server) handleClient(client *client) {
 	}
 }
 
-func (s *server) log() log.Logger {
-	return s.loadLog(&s.logStore)
-}
+func (s *server) log() *slog.Logger {
 
-func (s *server) mainlog() log.Logger {
-	return s.loadLog(&s.mainlogStore)
-}
-
-func (s *server) loadLog(value *atomic.Value) log.Logger {
-	if l, ok := value.Load().(log.Logger); ok {
-		return l
-	}
-	out := log.OutputStderr.String()
-	level := log.InfoLevel.String()
-	if value == &s.logStore {
-		if sc, ok := s.configStore.Load().(ServerConfig); ok && sc.LogFile != "" {
-			out = sc.LogFile
-		}
-		level = s.mainlog().GetLevel()
+	if s.logger == nil {
+		return slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
-	l, err := log.GetLogger(out, level)
-	if err == nil {
-		value.Store(l)
-	}
-	return l
+	return s.logger
 }
 
 // defaultHost ensures that the host attribute is set, if addressed to Postmaster
 func (s *server) defaultHost(a *mail.Address) {
 	if a.Host == "" && a.IsPostmaster() {
-		sc := s.configStore.Load().(ServerConfig)
+		sc := s.serverConfig
 		a.Host = sc.Hostname
 		if !s.allowsHost(a.Host) {
-			s.log().WithFields(
-				logrus.Fields{"hostname": sc.Hostname}).
-				Warn("the hostname is not present in AllowedHosts config setting")
+			s.log().Warn("the hostname is not present in AllowedHosts config setting", "hostname", sc.Hostname)
 		}
 	}
+}
+
+// Creates and returns a new ready-to-run Server from a ServerConfig configuration
+func newServer(sc *ServerConfig, backend backends.Backend, logger *slog.Logger) (*server, error) {
+	server := &server{
+		clientPool:      NewPool(sc.MaxClients),
+		closedListener:  make(chan bool, 1),
+		listenInterface: sc.ListenInterface,
+		state:           ServerStateNew,
+		envelopePool:    mail.NewPool(sc.MaxClients),
+	}
+	server.logger = logger
+	server.backend = backend
+
+	server.setConfig(sc)
+	server.setTimeout(sc.Timeout)
+
+	return server, nil
 }

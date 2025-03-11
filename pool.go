@@ -2,12 +2,12 @@ package guerrilla
 
 import (
 	"errors"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/phires/go-guerrilla/log"
 	"github.com/phires/go-guerrilla/mail"
 )
 
@@ -128,7 +128,7 @@ func (p *Pool) GetActiveClientsCount() int {
 }
 
 // Borrow a Client from the pool. Will block if len(activeClients) > maxClients
-func (p *Pool) Borrow(conn net.Conn, clientID uint64, logger log.Logger, ep *mail.Pool) (Poolable, error) {
+func (p *Pool) Borrow(conn net.Conn, clientID uint64, logger *slog.Logger, ep *mail.Pool) (Poolable, error) {
 	p.poolGuard.Lock()
 	defer p.poolGuard.Unlock()
 

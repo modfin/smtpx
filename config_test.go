@@ -11,7 +11,7 @@ import (
 	"github.com/phires/go-guerrilla/tests/testcert"
 )
 
-// a configuration file with a dummy backend
+// a configuration file with a dummy getBackend
 
 var configJsonA = `
 {
@@ -294,7 +294,7 @@ func TestConfigChangeEvents(t *testing.T) {
 	bcfg := backends.BackendConfig{"log_received_mails": true}
 	backend, err := backends.New(bcfg, logger)
 	if err != nil {
-		t.Error("cannot create backend", err)
+		t.Error("cannot create getBackend", err)
 	}
 	app, err := New(confA, backend, logger)
 	if err != nil {

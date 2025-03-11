@@ -3,15 +3,16 @@ package guerrilla
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/textproto"
 	"sync"
 	"time"
 
-	"github.com/phires/go-guerrilla/log"
 	"github.com/phires/go-guerrilla/mail"
 	"github.com/phires/go-guerrilla/mail/rfc5321"
 	"github.com/phires/go-guerrilla/response"
@@ -52,12 +53,12 @@ type client struct {
 	ar         *adjustableLimitedReader
 	// guards access to conn
 	connGuard sync.Mutex
-	log       log.Logger
+	log       *slog.Logger
 	parser    rfc5321.Parser
 }
 
 // NewClient allocates a new client.
-func NewClient(conn net.Conn, clientID uint64, logger log.Logger, envelope *mail.Pool) *client {
+func NewClient(conn net.Conn, clientID uint64, logger *slog.Logger, envelope *mail.Pool) *client {
 	c := &client{
 		conn: conn,
 		// Envelope will be borrowed from the envelope pool
@@ -79,7 +80,7 @@ func NewClient(conn net.Conn, clientID uint64, logger log.Logger, envelope *mail
 // the response gets buffered
 func (c *client) sendResponse(r ...interface{}) {
 	c.bufout.Reset(c.conn)
-	if c.log.IsDebug() {
+	if c.log.Enabled(context.Background(), slog.LevelDebug) {
 		// an additional buffer so that we can log the response in debug mode only
 		c.response.Reset()
 	}
@@ -97,9 +98,9 @@ func (c *client) sendResponse(r ...interface{}) {
 			out = v
 		}
 		if _, c.bufErr = c.bufout.WriteString(out); c.bufErr != nil {
-			c.log.WithError(c.bufErr).Error("could not write to c.bufout")
+			c.log.Error("could not write to c.bufout", "err", c.bufErr)
 		}
-		if c.log.IsDebug() {
+		if c.log.Enabled(context.Background(), slog.LevelDebug) {
 			c.response.WriteString(out)
 		}
 		if c.bufErr != nil {
@@ -107,7 +108,7 @@ func (c *client) sendResponse(r ...interface{}) {
 		}
 	}
 	_, c.bufErr = c.bufout.WriteString("\r\n")
-	if c.log.IsDebug() {
+	if c.log.Enabled(context.Background(), slog.LevelDebug) {
 		c.response.WriteString("\r\n")
 	}
 }

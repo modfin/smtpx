@@ -41,7 +41,7 @@ func getMockServerConfig() *ServerConfig {
 }
 
 // getMockServerConn gets a new server using sc. Server will be using a mocked TCP connection
-// using the dummy backend
+// using the dummy getBackend
 // RCP TO command only allows test.com host
 func getMockServerConn(sc *ServerConfig, t *testing.T) (*mocks.Conn, *server) {
 	var logOpenError error
@@ -54,7 +54,7 @@ func getMockServerConn(sc *ServerConfig, t *testing.T) (*mocks.Conn, *server) {
 		backends.BackendConfig{"log_received_mails": true, "save_workers_size": 1},
 		mainlog)
 	if err != nil {
-		t.Error("new dummy backend failed because:", err)
+		t.Error("new dummy getBackend failed because:", err)
 	}
 	server, err := newServer(sc, backend, mainlog)
 	if err != nil {
@@ -400,7 +400,7 @@ var customBackend = func() backends.Decorator {
 }
 
 // TestGithubIssue198 is an interesting test because it shows how to do an integration test for
-// a backend using a custom backend.
+// a getBackend using a custom getBackend.
 func TestGithubIssue198(t *testing.T) {
 	var mainlog log.Logger
 	var logOpenError error
@@ -961,7 +961,7 @@ func TestProxy(t *testing.T) {
 	wg.Wait() // wait for handleClient to exit
 }
 
-// The backend gateway should time out after 1 second because it sleeps for 2 sec.
+// The getBackend gateway should time out after 1 second because it sleeps for 2 sec.
 // The transaction should wait until finished, and then test to see if we can do
 // a second transaction
 func TestGatewayTimeout(t *testing.T) {
