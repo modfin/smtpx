@@ -145,6 +145,7 @@ func (c command) content(in []byte) []byte {
 
 // ListenAndServe begin accepting SMTP clients. Will block unless there is an error or Server.Shutdown() is called
 func (s *Server) ListenAndServe() error {
+	log := s.log().With("inf", s.Addr)
 
 	var clientID uint64
 	var err error
@@ -155,16 +156,16 @@ func (s *Server) ListenAndServe() error {
 		return fmt.Errorf("cannot listen on %s, err %w ", s.Addr, err)
 	}
 
-	s.log().Info("Listening on TCP", "interface", s.Addr)
+	log.Info("Listening on TCP", "interface", s.Addr)
 	s.state = ServerStateRunning
 
 	for {
-		s.log().Debug("Waiting for a new connection", "next_client_id", clientID+1, "interface", s.Addr)
+		log.Debug("Waiting for a new connection", "next_id", clientID+1)
 		conn, err := s.listener.Accept()
 		clientID++
 		if err != nil {
 			// TODO error my be temporary?
-			s.log().With("interface", s.Addr).Info("Server has stopped accepting new clients")
+			log.With("interface", s.Addr).Info("Server has stopped accepting new clients")
 			s.state = ServerStateStopped
 			close(s.closedListener)
 			return nil
@@ -239,7 +240,9 @@ func (s *Server) isShuttingDown() bool {
 // Handles an entire connection SMTP exchange
 func (s *Server) handleConn(conn *connection) {
 	defer conn.closeConn()
-	s.log().Info("Handle connection", "ip", conn.RemoteAddr, "id", conn.ClientId)
+	log := s.log().With("id", conn.ClientId, "ip", conn.RemoteAddr)
+
+	log.Info("Handle connection")
 
 	// Initial greeting
 	greeting := fmt.Sprintf("220 %s SMTP %s(%s) #%d  %s",
@@ -262,39 +265,66 @@ func (s *Server) handleConn(conn *connection) {
 		if err := conn.upgradeTLS(s.TLSConfig); err == nil {
 			advertiseTLS = ""
 		} else {
-			s.log().Warn("Failed TLS handshake", "ip", conn.RemoteAddr, "err", err)
+			log.Warn("Failed TLS handshake", "err", err)
 			// Server requires TLS, but can't handshake
 			conn.kill()
-			// TODO just return ?
+			return
 		}
 	}
 	if s.TLSConfig == nil {
 		// STARTTLS turned off, don't advertise it
 		advertiseTLS = ""
 	}
+
+	flush := func() error {
+		// flush the response buffer
+		if conn.bufout != nil && conn.bufout.Buffered() > 0 {
+			log.Debug(fmt.Sprintf("Writing response to connection: %s", conn.response.String()))
+			err := s.flushResponse(conn)
+			if err != nil {
+				return fmt.Errorf("could not flush buffer to client, %w", err)
+			}
+		}
+		return nil
+	}
+	defer flush()
+
 	for conn.isAlive() {
+		if conn.bufErr != nil {
+			log.Debug("connection could not buffer a response", "err", conn.bufErr)
+			return
+		}
+		if err := flush(); err != nil {
+			log.Debug("error flushing response", "err", err)
+			return
+		}
+
 		switch conn.state {
 		case ConnGreeting:
 			conn.sendResponse(greeting)
 			conn.state = ConnCmd
+
 		case ConnCmd:
 			conn.bufin.setLimit(CommandLineMaxLength)
 			input, err := s.readCommand(conn)
-			s.log().Debug("Client sent:", "command", input)
+			log.Debug("Client sent:", "command", input)
 			if err == io.EOF {
-				s.log().Warn("Client closed the connection", "ip", conn.RemoteAddr, "err", err)
+				log.Warn("Client closed the connection", "err", err)
 				return
-			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				s.log().Warn("Timeout", "ip", conn.RemoteAddr, "err", err)
+			}
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				log.Warn("Timeout", "err", err)
 				return
-			} else if err == LineLimitExceeded {
+			}
+			if errors.Is(err, LineLimitExceeded) {
 				conn.sendResponse(response.FailLineTooLong)
 				conn.kill()
-				break
-			} else if err != nil {
-				s.log().Warn("Read error", "ip", conn.RemoteAddr, "err", err)
+				return
+			}
+			if err != nil {
+				log.Warn("Read error", "err", err)
 				conn.kill()
-				break
+				return
 			}
 			if s.isShuttingDown() {
 				conn.state = ConnShutdown
@@ -316,7 +346,7 @@ func (s *Server) handleConn(conn *connection) {
 				if h, err := conn.parser.Helo(content); err == nil {
 					conn.Helo = h
 				} else {
-					s.log().Warn("invalid helo", "helo", h, "connection", conn.ID)
+					log.Warn("invalid helo", "helo", h, "connection", conn.ID)
 					conn.sendResponse(response.FailSyntaxError)
 					break
 				}
@@ -332,7 +362,7 @@ func (s *Server) handleConn(conn *connection) {
 				if h, _, err := conn.parser.Ehlo(content); err == nil {
 					conn.Helo = h
 				} else {
-					s.log().Warn("invalid ehlo", "ehlo", h, "connection", conn.ID)
+					log.Warn("invalid ehlo", "ehlo", h, "connection", conn.ID)
 					conn.sendResponse(response.FailSyntaxError)
 					break
 				}
@@ -351,7 +381,7 @@ func (s *Server) handleConn(conn *connection) {
 				conn.sendResponse("214-OK\r\n", quote)
 				continue
 
-			case s.XClientOn && cmdXCLIENT.match(cmd):
+			case cmdXCLIENT.match(cmd) && s.XClientOn:
 				// Client: XCLIENT ADDR=192.168.1.10 NAME=client.example.com PROTO=ESMTP AUTH=user@example.com
 				// The XCLIENT command is another Extended SMTP (ESMTP) command, but it's not standardized in the
 				// official RFCs. It's used by some mail servers, primarily Postfix, to provide client information to
@@ -377,7 +407,7 @@ func (s *Server) handleConn(conn *connection) {
 				conn.sendResponse(response.SuccessMailCmd)
 				continue
 
-			case s.ProxyOn && cmdPROXY.match(cmd):
+			case cmdPROXY.match(cmd) && s.ProxyOn:
 				// Client: PROXY TCP4 remote.host.example.com 192.168.1.10 192.168.1.20 5000 6000
 				// PROXY
 				// - TCP4: Protocol version.
@@ -388,7 +418,7 @@ func (s *Server) handleConn(conn *connection) {
 				// - 6000: The proxy's destination port.
 				content := bytes.TrimSpace(cmdPROXY.content(cmd))
 				toks := bytes.Split(content, []byte{' '})
-				s.log().Debug("PROXY", "command", content)
+				log.Debug("PROXY", "command", content)
 
 				switch len(toks) {
 				case 5:
@@ -402,7 +432,7 @@ func (s *Server) handleConn(conn *connection) {
 					conn.sendResponse(greeting)
 					continue
 				default:
-					s.log().Error("PROXY parse error, expected 5 or 6 parts", "data", "["+string(content)+"]")
+					log.Error("PROXY parse error, expected 5 or 6 parts", "data", "["+string(content)+"]")
 					conn.sendResponse(response.FailSyntaxError)
 					continue
 				}
@@ -418,7 +448,7 @@ func (s *Server) handleConn(conn *connection) {
 				content := cmdMAIL.content(cmd)
 				conn.MailFrom, err = conn.parsePath(content, conn.parser.MailFrom)
 				if err != nil {
-					s.log().Error("MAIL parse error", "data", "["+string(input[10:])+"]", "err", err)
+					log.Error("MAIL parse error", "data", "["+string(input[10:])+"]", "err", err)
 					conn.sendResponse(err)
 					continue
 				}
@@ -440,7 +470,7 @@ func (s *Server) handleConn(conn *connection) {
 				content := cmdRCPT.content(cmd)
 				to, err := conn.parsePath(content, conn.parser.RcptTo)
 				if err != nil {
-					s.log().Error("RCPT parse error", "data", "["+string(input[8:])+"]", "err", err)
+					log.Error("RCPT parse error", "data", "["+string(input[8:])+"]", "err", err)
 					conn.sendResponse(err.Error())
 					break
 				}
@@ -524,7 +554,7 @@ func (s *Server) handleConn(conn *connection) {
 				err = fmt.Errorf("maximum DATA size exceeded (%d)", s.MaxSize)
 			}
 			if err != nil {
-				s.log().Error("error reading data", "err", err)
+				log.Error("error reading data", "err", err)
 				if errors.Is(err, LineLimitExceeded) {
 					conn.sendResponse(response.FailReadLimitExceededDataCmd, " ", LineLimitExceeded.Error())
 					conn.kill()
@@ -535,7 +565,7 @@ func (s *Server) handleConn(conn *connection) {
 					conn.sendResponse(response.FailReadErrorDataCmd, " ", err.Error())
 					conn.kill()
 				}
-				s.log().Warn("Error reading data", "ip", conn.RemoteAddr, "err", err)
+				log.Warn("Error reading data", "err", err)
 				conn.resetTransaction()
 				continue
 			}
@@ -554,20 +584,20 @@ func (s *Server) handleConn(conn *connection) {
 
 		case ConnStartTLS:
 			if conn.TLS { // already in tls mode...
-				s.log().Warn("Failed TLS start, tls is alreade active", "ip", conn.RemoteAddr)
+				log.Warn("Failed TLS start, tls is alreade active")
 				conn.state = ConnCmd
 				continue
 			}
 
 			if s.TLSConfig == nil { // no tls config available
-				s.log().Warn("Failed TLS start, no tls config", "ip", conn.RemoteAddr)
+				log.Warn("Failed TLS start, no tls config")
 				conn.state = ConnCmd
 				continue
 			}
 
 			err := conn.upgradeTLS(s.TLSConfig)
 			if err != nil {
-				s.log().Warn("Failed TLS handshake", "ip", conn.RemoteAddr, "err", err)
+				log.Warn("Failed TLS handshake", "err", err)
 				conn.state = ConnCmd
 				continue
 			}
@@ -580,22 +610,7 @@ func (s *Server) handleConn(conn *connection) {
 			// shutdown state
 			conn.sendResponse(response.ErrorShutdown)
 			conn.kill()
-		}
 
-		if conn.bufErr != nil {
-			s.log().Debug("connection could not buffer a response", "err", conn.bufErr)
-			return
-		}
-		// flush the response buffer
-		if conn.bufout.Buffered() > 0 {
-
-			s.log().Debug(fmt.Sprintf("Writing response to connection: %s", conn.response.String()))
-
-			err := s.flushResponse(conn)
-			if err != nil {
-				s.log().Debug("error writing response", "err", err)
-				return
-			}
 		}
 
 	}
