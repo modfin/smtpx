@@ -1,4 +1,4 @@
-package guerrilla
+package brevx
 
 import (
 	"github.com/crholm/brevx/envelope"

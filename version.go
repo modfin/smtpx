@@ -1,4 +1,4 @@
-package guerrilla
+package brevx
 
 const (
 	Name    = "Brevx"

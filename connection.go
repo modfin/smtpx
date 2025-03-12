@@ -1,4 +1,4 @@
-package guerrilla
+package brevx
 
 import (
 	"bufio"
@@ -71,7 +71,7 @@ func newConnection(conn net.Conn, clientID uint64, logger *slog.Logger) *connect
 		Envelope:    envelope.NewEnvelope(conn.RemoteAddr(), clientID),
 		ConnectedAt: time.Now(),
 
-		log: logger,
+		log: logger.With("id", clientID, "ip", conn.RemoteAddr()),
 	}
 
 	c.resetIn()

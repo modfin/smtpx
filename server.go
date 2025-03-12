@@ -1,4 +1,4 @@
-package guerrilla
+package brevx
 
 import (
 	"context"
@@ -189,6 +189,7 @@ func (s *Server) ListenAndServe() error {
 			defer s.wgConnections.Done()
 			defer s.countConnections.Add(-1)
 			defer conn.Close()
+
 			s.handleConn(newConnection(conn, clientID, s.Logger))
 
 		}(conn, clientID)
@@ -226,10 +227,9 @@ func (s *Server) isShuttingDown() bool {
 // Handles an entire connection SMTP exchange
 func (s *Server) handleConn(conn *connection) {
 	defer conn.closeConn()
-	log := s.log().With("id", conn.ClientId(), "ip", conn.RemoteAddr)
 
-	log.Info("Handle connection")
-	defer log.Info("Close connection")
+	conn.log.Info("Handle connection")
+	defer conn.log.Info("Close connection")
 
 	// Initial greeting
 	greeting := fmt.Sprintf("220 %s SMTP %s(%s) #%d  %s",
@@ -252,7 +252,7 @@ func (s *Server) handleConn(conn *connection) {
 		if err := conn.upgradeTLS(s.TLSConfig); err == nil {
 			advertiseTLS = ""
 		} else {
-			log.Warn("Failed TLS handshake", "err", err)
+			conn.log.Warn("Failed TLS handshake", "err", err)
 			// Server requires TLS, but can't handshake
 			conn.kill()
 			return
@@ -265,7 +265,7 @@ func (s *Server) handleConn(conn *connection) {
 
 	for conn.isAlive() {
 		if conn.bufErr != nil {
-			log.Debug("connection could not buffer a response", "err", conn.bufErr)
+			conn.log.Debug("connection could not buffer a response", "err", conn.bufErr)
 			return
 		}
 
@@ -278,13 +278,13 @@ func (s *Server) handleConn(conn *connection) {
 		case ConnCmd:
 			// TODO set readlimit ... // TODO avoid DoS
 			cmd, err := conn.readCommand()
-			log.Debug("Client: " + cmd)
+			conn.log.Debug("Client: " + cmd)
 			if err == io.EOF {
-				log.Warn("Client closed the connection", "err", err)
+				conn.log.Warn("Client closed the connection", "err", err)
 				return
 			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				log.Warn("Timeout", "err", err)
+				conn.log.Warn("Timeout", "err", err)
 				return
 			}
 			if errors.Is(err, LineLimitExceeded) {
@@ -293,7 +293,7 @@ func (s *Server) handleConn(conn *connection) {
 				return
 			}
 			if err != nil {
-				log.Warn("Read error", "err", err)
+				conn.log.Warn("Read error", "err", err)
 				conn.kill()
 				return
 			}
@@ -386,7 +386,7 @@ func (s *Server) handleConn(conn *connection) {
 				// - 6000: The proxy's destination port.
 				content := strings.TrimSpace(cmdPROXY.content(cmd))
 				toks := strings.Fields(content)
-				log.Debug("PROXY", "command", content)
+				conn.log.Debug("PROXY", "command", content)
 
 				switch len(toks) {
 				case 5:
@@ -400,7 +400,7 @@ func (s *Server) handleConn(conn *connection) {
 					conn.sendResponse(greeting)
 					continue
 				default:
-					log.Error("PROXY parse error, expected 5 or 6 parts", "data", content)
+					conn.log.Error("PROXY parse error, expected 5 or 6 parts", "data", content)
 					conn.sendResponse(response.FailSyntaxError)
 					continue
 				}
@@ -416,7 +416,7 @@ func (s *Server) handleConn(conn *connection) {
 				content := cmdMAIL.content(cmd)
 				conn.MailFrom, err = mail.ParseAddress(string(content))
 				if err != nil {
-					log.Error("MAIL parse error", "data", "["+string(content)+"]", "err", err)
+					conn.log.Error("MAIL parse error", "data", "["+string(content)+"]", "err", err)
 					conn.sendResponse(err)
 					continue
 				}
@@ -424,7 +424,7 @@ func (s *Server) handleConn(conn *connection) {
 				// Hook to Backend to check if it alloed
 				err = s.Backend.Mail(conn.Envelope, conn.MailFrom)
 				if err != nil { // indicates that we should abort
-					log.Error("MAIL hook error", "data", "["+string(content)+"]", "err", err)
+					conn.log.Error("MAIL hook error", "data", "["+string(content)+"]", "err", err)
 					conn.sendResponse(response.RejectedSenderMailCmd)
 					conn.kill()
 					continue
@@ -443,7 +443,7 @@ func (s *Server) handleConn(conn *connection) {
 				content := cmdRCPT.content(cmd)
 				to, err := mail.ParseAddress(string(content))
 				if err != nil {
-					log.Error("RCPT parse error", "data", "["+string(content)+"]", "err", err)
+					conn.log.Error("RCPT parse error", "data", "["+string(content)+"]", "err", err)
 					conn.sendResponse(response.FailSyntaxError)
 					break
 				}
@@ -451,7 +451,7 @@ func (s *Server) handleConn(conn *connection) {
 				// Hook to Backend to check if ut i is allowed
 				err = s.Backend.Rcpt(conn.Envelope, to)
 				if err != nil { // indicates that we should abort
-					log.Error("MAIL hook error", "data", "["+string(content)+"]", "err", err)
+					conn.log.Error("MAIL hook error", "data", "["+string(content)+"]", "err", err)
 					conn.sendResponse(response.RejectedRcptCmd)
 					conn.kill()
 					continue
@@ -536,7 +536,7 @@ func (s *Server) handleConn(conn *connection) {
 				err = fmt.Errorf("maximum DATA size exceeded (%d)", s.MaxSize)
 			}
 			if err != nil {
-				log.Error("error reading data", "err", err)
+				conn.log.Error("error reading data", "err", err)
 				if errors.Is(err, LineLimitExceeded) {
 					conn.sendResponse(response.FailReadLimitExceededDataCmd, " ", LineLimitExceeded.Error())
 					conn.kill()
@@ -547,7 +547,7 @@ func (s *Server) handleConn(conn *connection) {
 					conn.sendResponse(response.FailReadErrorDataCmd, " ", err.Error())
 					conn.kill()
 				}
-				log.Warn("Error reading data", "err", err)
+				conn.log.Warn("Error reading data", "err", err)
 				conn.resetTransaction()
 				continue
 			}
@@ -566,20 +566,20 @@ func (s *Server) handleConn(conn *connection) {
 
 		case ConnStartTLS:
 			if conn.TLS { // already in tls mode...
-				log.Warn("Failed TLS start, tls is alreade active")
+				conn.log.Warn("Failed TLS start, tls is alreade active")
 				conn.state = ConnCmd
 				continue
 			}
 
 			if s.TLSConfig == nil { // no tls config available
-				log.Warn("Failed TLS start, no tls config")
+				conn.log.Warn("Failed TLS start, no tls config")
 				conn.state = ConnCmd
 				continue
 			}
 
 			err := conn.upgradeTLS(s.TLSConfig)
 			if err != nil {
-				log.Warn("Failed TLS handshake", "err", err)
+				conn.log.Warn("Failed TLS handshake", "err", err)
 				conn.state = ConnCmd
 				continue
 			}
