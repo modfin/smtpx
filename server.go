@@ -411,13 +411,15 @@ func (s *Server) handleConn(conn *connection) {
 				// Used for the Return-Path header
 				if conn.isInTransaction() {
 					conn.sendResponse(response.FailNestedMailCmd)
+					conn.errors++
 					continue
 				}
 				content := cmdMAIL.content(cmd)
 				conn.MailFrom, err = mail.ParseAddress(string(content))
 				if err != nil {
 					conn.log.Error("MAIL parse error", "data", "["+string(content)+"]", "err", err)
-					conn.sendResponse(err)
+					conn.sendResponse(response.RejectedSenderMailCmd)
+					conn.errors++
 					continue
 				}
 
@@ -426,7 +428,7 @@ func (s *Server) handleConn(conn *connection) {
 				if err != nil { // indicates that we should abort
 					conn.log.Error("MAIL hook error", "data", "["+string(content)+"]", "err", err)
 					conn.sendResponse(response.RejectedSenderMailCmd)
-					conn.kill()
+					conn.errors++
 					continue
 				}
 
@@ -438,22 +440,24 @@ func (s *Server) handleConn(conn *connection) {
 				// This is the SMTP command that specifies the recipient's email address.
 				if len(conn.RcptTo) > rfc5321.LimitRecipients {
 					conn.sendResponse(response.ErrorTooManyRecipients)
-					break
+					conn.errors++
+					continue
 				}
 				content := cmdRCPT.content(cmd)
-				to, err := mail.ParseAddress(string(content))
+				to, err := mail.ParseAddress(content)
 				if err != nil {
 					conn.log.Error("RCPT parse error", "data", "["+string(content)+"]", "err", err)
 					conn.sendResponse(response.FailSyntaxError)
-					break
+					conn.errors++
+					continue
 				}
 
 				// Hook to Backend to check if ut i is allowed
 				err = s.Backend.Rcpt(conn.Envelope, to)
 				if err != nil { // indicates that we should abort
-					conn.log.Error("MAIL hook error", "data", "["+string(content)+"]", "err", err)
+					conn.log.Error("RCPT hook error", "data", "["+string(content)+"]", "err", err)
 					conn.sendResponse(response.RejectedRcptCmd)
-					conn.kill()
+					conn.errors++
 					continue
 				}
 

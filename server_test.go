@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/crholm/brevx/envelope"
 	"github.com/crholm/brevx/mocks"
+	"github.com/stretchr/testify/require"
 	"log/slog"
 	"net"
 	"net/smtp"
@@ -376,12 +377,10 @@ func TestTLSMultiple(t *testing.T) {
 	if err := c.Rcpt(to2); err != nil {
 		t.Fatalf("failed to set recipient: %v", err)
 	}
-
 	w, err = c.Data()
 	if err != nil {
 		t.Fatalf("failed to start data transfer: %v", err)
 	}
-
 	_, err = w.Write([]byte(msg2))
 	if err != nil {
 		t.Fatalf("failed to write data: %v", err)
@@ -390,6 +389,7 @@ func TestTLSMultiple(t *testing.T) {
 		t.Fatalf("failed to close data transfer: %v", err)
 	}
 
+	// Terminate the connection
 	if err := c.Quit(); err != nil {
 		t.Fatal(err)
 	}
@@ -431,4 +431,181 @@ func TestTLSMultiple(t *testing.T) {
 		t.Fatal(err)
 	}
 
+}
+
+func TestSMTPServer(t *testing.T) {
+	// Setup - generate a test CA and server certificate
+	addr := ":2525"
+	// Create an SMTP server for testing
+	_, server, certPool := StartTLSServer(addr, t)
+	defer server.Shutdown(context.Background())
+
+	// Get the server address
+	host := server.Hostname
+
+	// Test cases
+	t.Run("Basic Email Sending", func(t *testing.T) {
+		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+			"to@example.com", "Test Subject", "Test Body")
+		require.NoError(t, err, "Should send email successfully")
+	})
+
+	t.Run("Invalid Sender", func(t *testing.T) {
+		// Test with invalid sender format
+		err := SendEmailWithCustomCA(certPool, host, addr, "not-an-email",
+			"to@example.com", "Test Subject", "Test Body")
+		require.Error(t, err, "Should reject invalid sender format")
+	})
+
+	t.Run("Invalid Recipient", func(t *testing.T) {
+		// Test with invalid recipient format
+		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+			"not-an-email", "Test Subject", "Test Body")
+		require.Error(t, err, "Should reject invalid recipient format")
+	})
+
+	//t.Run("Multiple Recipients", func(t *testing.T) {
+	//	// Test sending to multiple recipients
+	//	err := SendEmailWithMultipleRecipients(rootCert, host, port, "user", "pass", "from@example.com",
+	//		[]string{"to1@example.com", "to2@example.com"},
+	//		"Test Subject", "Test Body")
+	//	require.NoError(t, err, "Should handle multiple recipients")
+	//})
+	//
+	//t.Run("Large Message Body", func(t *testing.T) {
+	//	// Generate a large message body (1MB)
+	//	largeBody := strings.Repeat("Lorem ipsum dolor sit amet ", 25000)
+	//	err := SendEmailWithCustomCA(rootCert, host, port, "user", "pass", "from@example.com",
+	//		"to@example.com", "Large Email", largeBody)
+	//	require.NoError(t, err, "Should handle large message bodies")
+	//})
+	//
+	//t.Run("HTML Content", func(t *testing.T) {
+	//	// Test sending HTML content
+	//	htmlBody := "<html><body><h1>Test Email</h1><p>This is a <b>test</b> email with HTML content.</p></body></html>"
+	//	err := SendEmailWithHTMLContent(rootCert, host, port, "user", "pass", "from@example.com",
+	//		"to@example.com", "HTML Email", htmlBody)
+	//	require.NoError(t, err, "Should handle HTML content")
+	//})
+	//
+	//t.Run("With Attachments", func(t *testing.T) {
+	//	// Test sending an email with attachments
+	//	attachments := []Attachment{
+	//		{
+	//			Filename: "test.txt",
+	//			Data:     []byte("This is a test file content"),
+	//			MimeType: "text/plain",
+	//		},
+	//		{
+	//			Filename: "image.png",
+	//			Data:     generateTestImage(),
+	//			MimeType: "image/png",
+	//		},
+	//	}
+	//	err := SendEmailWithAttachments(rootCert, host, port, "user", "pass", "from@example.com",
+	//		"to@example.com", "Email with Attachments", "Please see attachments",
+	//		attachments)
+	//	require.NoError(t, err, "Should handle email with attachments")
+	//})
+	//
+	//t.Run("Connection Timeout", func(t *testing.T) {
+	//	// Test with a very short timeout
+	//	err := SendEmailWithTimeout(rootCert, "10.255.255.1", 25, 100*time.Millisecond, "user", "pass",
+	//		"from@example.com", "to@example.com", "Test Subject", "Test Body")
+	//	require.Error(t, err, "Should timeout on connection")
+	//	require.Contains(t, err.Error(), "timeout", "Error should mention timeout")
+	//})
+	//
+	//t.Run("Invalid Server Certificate", func(t *testing.T) {
+	//	// Generate a different CA that the client doesn't trust
+	//	untrustedCert, untrustedKey, _ := GenerateRootCA()
+	//	err := SendEmailWithCustomCA(untrustedCert, host, port, "user", "pass", "from@example.com",
+	//		"to@example.com", "Test Subject", "Test Body")
+	//	require.Error(t, err, "Should reject untrusted server certificate")
+	//	require.Contains(t, err.Error(), "certificate", "Error should mention certificate")
+	//})
+	//
+	//t.Run("Server Disconnects", func(t *testing.T) {
+	//	// Create a server that disconnects after accepting the connection
+	//	disconnectingServer := setupDisconnectingServer(t)
+	//	defer disconnectingServer.Close()
+	//
+	//	serverAddr := disconnectingServer.Addr().String()
+	//	host, portStr, _ := net.SplitHostPort(serverAddr)
+	//	port, _ := strconv.Atoi(portStr)
+	//
+	//	err := SendEmailWithCustomCA(rootCert, host, port, "user", "pass", "from@example.com",
+	//		"to@example.com", "Test Subject", "Test Body")
+	//	require.Error(t, err, "Should handle server disconnection")
+	//})
+	//
+	//t.Run("Invalid TLS Configuration", func(t *testing.T) {
+	//	// Test with nil TLS config
+	//	err := SendEmailWithNilTLSConfig(host, port, "user", "pass", "from@example.com",
+	//		"to@example.com", "Test Subject", "Test Body")
+	//	require.Error(t, err, "Should handle nil TLS config")
+	//})
+}
+
+// SendEmailWithCustomCA sends an email using SMTP with a custom CA certificate
+func SendEmailWithCustomCA(certPool *x509.CertPool, host string, addr string, from, to, subject, body string) error {
+	// Create a cert pool and add our CA
+
+	// Configure TLS with our cert pool
+	tlsConfig := &tls.Config{
+		RootCAs:    certPool,
+		ServerName: host,
+	}
+
+	// Connect to the SMTP server (without TLS initially)
+	c, err := smtp.Dial(addr)
+	if err != nil {
+		return fmt.Errorf("failed to connect to SMTP server: %w", err)
+	}
+	defer c.Close()
+
+	// Check if the server supports STARTTLS
+	if ok, _ := c.Extension("STARTTLS"); ok {
+		// Start TLS
+		if err = c.StartTLS(tlsConfig); err != nil {
+			return fmt.Errorf("failed to start TLS: %w", err)
+		}
+	}
+
+	// Set the sender
+	if err = c.Mail(from); err != nil {
+		return fmt.Errorf("failed to set sender: %w", err)
+	}
+
+	// Set the recipient
+	if err = c.Rcpt(to); err != nil {
+		return fmt.Errorf("failed to set recipient: %w", err)
+	}
+
+	// Send the email body
+	w, err := c.Data()
+	if err != nil {
+		return fmt.Errorf("failed to open message writer: %w", err)
+	}
+
+	// Construct the message with headers and body
+	msg := fmt.Sprintf("From: %s\r\n"+
+		"To: %s\r\n"+
+		"Subject: %s\r\n"+
+		"MIME-Version: 1.0\r\n"+
+		"Content-Type: text/plain; charset=UTF-8\r\n"+
+		"\r\n"+
+		"%s", from, to, subject, body)
+
+	_, err = w.Write([]byte(msg))
+	if err != nil {
+		return fmt.Errorf("failed to write message: %w", err)
+	}
+
+	if err = w.Close(); err != nil {
+		return fmt.Errorf("failed to close message writer: %w", err)
+	}
+
+	// Send the QUIT command and close the connection
+	return c.Quit()
 }
