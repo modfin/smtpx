@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"fmt"
-	"github.com/phires/go-guerrilla/envelope"
+	"github.com/crholm/brevx/envelope"
 	"io"
 	"log/slog"
 	"net"
@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/phires/go-guerrilla/mail/rfc5321"
+	"github.com/crholm/brevx/mail/rfc5321"
 )
 
 // ClientState indicates which part of the SMTP transaction a given connection is in.

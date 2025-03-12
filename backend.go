@@ -1,7 +1,7 @@
 package guerrilla
 
 import (
-	"github.com/phires/go-guerrilla/envelope"
+	"github.com/crholm/brevx/envelope"
 	"net/mail"
 )
 

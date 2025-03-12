@@ -3,7 +3,7 @@ package guerrilla
 import (
 	"context"
 	"fmt"
-	"github.com/phires/go-guerrilla/envelope"
+	"github.com/crholm/brevx/envelope"
 	"log/slog"
 	"net"
 	"net/smtp"

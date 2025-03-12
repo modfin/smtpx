@@ -1,7 +1,7 @@
 package encoding
 
 import (
-	"github.com/phires/go-guerrilla/envelope"
+	"github.com/crholm/brevx/envelope"
 	"strings"
 	"testing"
 )

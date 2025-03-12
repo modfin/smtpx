@@ -5,7 +5,7 @@
 package encoding
 
 import (
-	"github.com/phires/go-guerrilla/envelope"
+	"github.com/crholm/brevx/envelope"
 	"io"
 
 	cs "golang.org/x/net/html/charset"

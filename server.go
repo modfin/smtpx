@@ -15,8 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/phires/go-guerrilla/mail/rfc5321"
-	"github.com/phires/go-guerrilla/response"
+	"github.com/crholm/brevx/mail/rfc5321"
+	"github.com/crholm/brevx/response"
 )
 
 const (

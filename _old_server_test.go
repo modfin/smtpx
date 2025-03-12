@@ -1,7 +1,7 @@
 package guerrilla
 
 import (
-	"github.com/phires/go-guerrilla/envelope"
+	"github.com/crholm/brevx/envelope"
 	"os"
 	"testing"
 
@@ -15,10 +15,10 @@ import (
 	"io/ioutil"
 	"net"
 
-	"github.com/phires/go-guerrilla/backends"
-	"github.com/phires/go-guerrilla/log"
-	"github.com/phires/go-guerrilla/mail"
-	"github.com/phires/go-guerrilla/mocks"
+	"github.com/crholm/brevx/backends"
+	"github.com/crholm/brevx/log"
+	"github.com/crholm/brevx/mail"
+	"github.com/crholm/brevx/mocks"
 )
 
 // getMockServerConfig gets a mock ServerConfig struct used for creating a new Server

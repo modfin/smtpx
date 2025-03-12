@@ -1,7 +1,7 @@
 package backends
 
 import (
-	"github.com/phires/go-guerrilla/envelope"
+	"github.com/crholm/brevx/envelope"
 )
 
 type SelectTask int
