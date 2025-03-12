@@ -3,21 +3,15 @@ package mail
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
+	"github.com/phires/go-guerrilla/mail/rfc5321"
 	"mime"
 	"net"
 	"net/textproto"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/phires/go-guerrilla/mail/rfc5321"
 )
 
-// A WordDecoder decodes MIME headers containing RFC 2047 encoded-words.
+// Dec  A WordDecoder decodes MIME headers containing RFC 2047 encoded-words.
 // Used by the MimeHeaderDecode function.
 // It's exposed public so that an alternative decoder can be set, eg Gnu iconv
 // by importing the mail/inconv package.
@@ -28,8 +22,6 @@ func init() {
 	// use the default decoder, without Gnu inconv. Import the mail/inconv package to use iconv.
 	Dec = mime.WordDecoder{}
 }
-
-const maxHeaderChunk = 1 + (10240 << 10) // 10MB
 
 // Address encodes an email address of the form `<user@host>`
 type Address struct {
@@ -121,140 +113,51 @@ func NewAddress(str string) (*Address, error) {
 
 // Envelope of Email represents a single SMTP message.
 type Envelope struct {
+	ClientId uint64
+
 	// Remote IP address
-	RemoteIP string
+	RemoteAddr net.Addr
+
 	// Message sent in EHLO command
 	Helo string
-	// Sender
-	MailFrom Address
-	// Recipients
-	RcptTo []Address
-	// Data stores the header and message body
-	Data bytes.Buffer
-	// Subject stores the subject of the email, extracted and decoded after calling ParseHeaders()
-	Subject string
+
 	// TLS is true if the email was received using a TLS connection
 	TLS bool
-	// Header stores the results from ParseHeaders()
-	Header textproto.MIMEHeader
-	// Values hold the values generated when processing the envelope by the backend
-	Values map[string]interface{}
-	// Hashes of each email on the rcpt
-	Hashes []string
-	// additional delivery header that may be added
-	DeliveryHeader string
-	// Email(s) will be queued with this id
-	QueuedId string
 	// ESMTP: true if EHLO was used
 	ESMTP bool
-	// When locked, it means that the envelope is being processed by the backend
-	sync.Mutex
+
+	// Sender
+	MailFrom Address
+
+	// Recipients
+	RcptTo []Address
+
+	// Data stores the header and message body
+	Data bytes.Buffer
 }
 
-func NewEnvelope(remoteAddr string, clientID uint64) *Envelope {
+func NewEnvelope(remoteAddr net.Addr, clientID uint64) *Envelope {
 	return &Envelope{
-		RemoteIP: remoteAddr,
-		Values:   make(map[string]interface{}),
-		QueuedId: queuedID(clientID),
+		ClientId:   clientID,
+		RemoteAddr: remoteAddr,
 	}
 }
 
-// queuedID generates a unique id for the email
-// It's a sha256 hash of the current unix timestamp and the clientID
-// The clientID is used to ensure that the id is unique when multiple clients are sending emails at the same time
-// The timestamp is used to ensure that the id is unique when multiple emails are sent by the same client at the same time
-// We're using the last 12 chars of the sha256 hash, as this should be enough to ensure uniqueness
-func queuedID(clientID uint64) string {
-	var queueID = fmt.Sprintf("%x%x", time.Now().Unix(), clientID)
-	// get the last 6 bytes of the sha256 hash (12 chars)
-	var hash = sha256.Sum256([]byte(queueID))
-	return fmt.Sprintf("%x", hash[len(hash)-6:])
-}
+// ParseHeaders parses the headers from Envelope
+func ParseHeaders(e *Envelope) (textproto.MIMEHeader, error) {
+	header, _, found := bytes.Cut(e.Data.Bytes(), []byte{'\n', '\n'}) // the first two new-lines chars are the End Of Header
 
-// ParseHeaders parses the headers into Header field of the Envelope struct.
-// Data buffer must be full before calling.
-// It assumes that at most 30kb of email data can be a header
-// Decoding of encoding to UTF is only done on the Subject, where the result is assigned to the Subject field
-func (e *Envelope) ParseHeaders() error {
-	var err error
-	if e.Header != nil {
-		return errors.New("headers already parsed")
+	if !found {
+		return nil, errors.New("could not find headers")
 	}
-	buf := e.Data.Bytes()
-	// find where the header ends, assuming that over 30 kb would be max
-	if len(buf) > maxHeaderChunk {
-		buf = buf[:maxHeaderChunk]
-	}
-
-	headerEnd := bytes.Index(buf, []byte{'\n', '\n'}) // the first two new-lines chars are the End Of Header
-	if headerEnd > -1 {
-		header := buf[0 : headerEnd+2]
-		headerReader := textproto.NewReader(bufio.NewReader(bytes.NewBuffer(header)))
-		e.Header, err = headerReader.ReadMIMEHeader()
-		if err == nil || err == io.EOF {
-			// decode the subject
-			if subject, ok := e.Header["Subject"]; ok {
-				e.Subject = MimeHeaderDecode(subject[0])
-			}
-		}
-	} else {
-		err = errors.New("header not found")
-	}
-	return err
-}
-
-// Len returns the number of bytes that would be in the reader returned by NewReader()
-func (e *Envelope) Len() int {
-	return len(e.DeliveryHeader) + e.Data.Len()
-}
-
-// NewReader returns a new reader for reading the email contents, including the delivery headers
-func (e *Envelope) NewReader() io.Reader {
-	return io.MultiReader(
-		strings.NewReader(e.DeliveryHeader),
-		bytes.NewReader(e.Data.Bytes()),
-	)
+	headerReader := textproto.NewReader(bufio.NewReader(bytes.NewBuffer(header)))
+	return headerReader.ReadMIMEHeader()
 }
 
 // String converts the email to string.
 // Typically, you would want to use the compressor guerrilla.Processor for more efficiency, or use NewReader
 func (e *Envelope) String() string {
-	return e.DeliveryHeader + e.Data.String()
-}
-
-// ResetTransaction is called when the transaction is reset (keeping the connection open)
-func (e *Envelope) ResetTransaction() {
-
-	// ensure not processing by the backend, will only get lock if finished, otherwise block
-	e.Lock()
-	// got the lock, it means processing finished
-	e.Unlock()
-
-	e.MailFrom = Address{}
-	e.RcptTo = []Address{}
-	// reset the data buffer, keep it allocated
-	e.Data.Reset()
-
-	// todo: these are probably good candidates for buffers / use sync.Pool (after profiling)
-	e.Subject = ""
-	e.Header = nil
-	e.Hashes = make([]string, 0)
-	e.DeliveryHeader = ""
-	e.Values = make(map[string]interface{})
-}
-
-// Reseed is called when used with a new connection, once it's accepted
-func (e *Envelope) Reseed(remoteIP string, clientID uint64) {
-	e.RemoteIP = remoteIP
-	e.QueuedId = queuedID(clientID)
-	e.Helo = ""
-	e.TLS = false
-	e.ESMTP = false
-}
-
-// PushRcpt adds a recipient email address to the envelope
-func (e *Envelope) PushRcpt(addr Address) {
-	e.RcptTo = append(e.RcptTo, addr)
+	return e.Data.String()
 }
 
 // PopRcpt removes the last email address that was pushed to the envelope
@@ -422,45 +325,4 @@ func hasEncodedWordAhead(str string, i int) int {
 		}
 	}
 	return -1
-}
-
-// Envelopes have their own pool
-
-type Pool struct {
-	// envelopes that are ready to be borrowed
-	pool chan *Envelope
-	// semaphore to control number of maximum borrowed envelopes
-	sem chan bool
-}
-
-func NewPool(poolSize int) *Pool {
-	return &Pool{
-		pool: make(chan *Envelope, poolSize),
-		sem:  make(chan bool, poolSize),
-	}
-}
-
-func (p *Pool) Borrow(remoteAddr string, clientID uint64) *Envelope {
-	var e *Envelope
-	p.sem <- true // block the envelope until more room
-	select {
-	case e = <-p.pool:
-		e.Reseed(remoteAddr, clientID)
-	default:
-		e = NewEnvelope(remoteAddr, clientID)
-	}
-	return e
-}
-
-// Return returns an envelope back to the envelope pool
-// Make sure that envelope finished processing before calling this
-func (p *Pool) Return(e *Envelope) {
-	select {
-	case p.pool <- e:
-		//placed envelope back in pool
-	default:
-		// pool is full, discard it
-	}
-	// take a value off the semaphore to make room for more envelopes
-	<-p.sem
 }

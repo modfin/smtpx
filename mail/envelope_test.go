@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -96,13 +98,14 @@ func TestAddressWithIP(t *testing.T) {
 }
 
 func TestEnvelope(t *testing.T) {
-	e := NewEnvelope("127.0.0.1", 22)
+
+	e := NewEnvelope(&net.TCPAddr{IP: net.ParseIP("127.0.0.1")}, 22)
 
 	e.QueuedId = "abc123"
 	e.Helo = "helo.example.com"
 	e.MailFrom = Address{User: "test", Host: "example.com"}
 	e.TLS = true
-	e.RemoteIP = "222.111.233.121"
+	e.RemoteAddr = "222.111.233.121"
 	to := Address{User: "test", Host: "example.com"}
 	e.PushRcpt(to)
 	if to.String() != "test@example.com" {
@@ -111,7 +114,7 @@ func TestEnvelope(t *testing.T) {
 	e.Data.WriteString("Subject: Test\n\nThis is a test nbnb nbnb hgghgh nnnbnb nbnbnb nbnbn.")
 
 	addHead := "Delivered-To: " + to.String() + "\n"
-	addHead += "Received: from " + e.Helo + " (" + e.Helo + "  [" + e.RemoteIP + "])\n"
+	addHead += "Received: from " + e.Helo + " (" + e.Helo + "  [" + e.RemoteAddr + "])\n"
 	e.DeliveryHeader = addHead
 
 	r := e.NewReader()
@@ -147,7 +150,7 @@ func TestEnvelopeLargeHeader(t *testing.T) {
 	e.Helo = "helo.example.com"
 	e.MailFrom = Address{User: "test", Host: "example.com"}
 	e.TLS = true
-	e.RemoteIP = "222.111.233.121"
+	e.RemoteAddr = "222.111.233.121"
 	to := Address{User: "test", Host: "example.com"}
 	e.PushRcpt(to)
 	if to.String() != "test@example.com" {
@@ -163,7 +166,7 @@ func TestEnvelopeLargeHeader(t *testing.T) {
 	e.Data.WriteString(fmt.Sprintf("%s\n\nHello Test", header))
 
 	addHead := "Delivered-To: " + to.String() + "\n"
-	addHead += "Received: from " + e.Helo + " (" + e.Helo + "  [" + e.RemoteIP + "])\n"
+	addHead += "Received: from " + e.Helo + " (" + e.Helo + "  [" + e.RemoteAddr + "])\n"
 	e.DeliveryHeader = addHead
 
 	r := e.NewReader()

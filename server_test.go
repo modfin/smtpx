@@ -20,7 +20,7 @@ import (
 	"github.com/phires/go-guerrilla/mocks"
 )
 
-// getMockServerConfig gets a mock ServerConfig struct used for creating a new server
+// getMockServerConfig gets a mock ServerConfig struct used for creating a new Server
 func getMockServerConfig() *ServerConfig {
 	sc := &ServerConfig{
 		IsEnabled: true, // not tested here
@@ -40,10 +40,10 @@ func getMockServerConfig() *ServerConfig {
 	return sc
 }
 
-// getMockServerConn gets a new server using sc. Server will be using a mocked TCP connection
+// getMockServerConn gets a new Server using sc. Server will be using a mocked TCP connection
 // using the dummy getBackend
 // RCP TO command only allows test.com host
-func getMockServerConn(sc *ServerConfig, t *testing.T) (*mocks.Conn, *server) {
+func getMockServerConn(sc *ServerConfig, t *testing.T) (*mocks.Conn, *Server) {
 	var logOpenError error
 	var mainlog log.Logger
 	mainlog, logOpenError = log.GetLogger(sc.LogFile, "debug")
@@ -58,7 +58,7 @@ func getMockServerConn(sc *ServerConfig, t *testing.T) (*mocks.Conn, *server) {
 	}
 	server, err := newServer(sc, backend, mainlog)
 	if err != nil {
-		//t.Error("new server failed because:", err)
+		//t.Error("new Server failed because:", err)
 	} else {
 		server.setAllowedHosts([]string{"test.com"})
 	}
@@ -157,10 +157,10 @@ func cleanTestArtifacts(t *testing.T) {
 	if err := deleteIfExists("rootca.test.pem"); err != nil {
 		t.Error(err)
 	}
-	if err := deleteIfExists("client.test.key"); err != nil {
+	if err := deleteIfExists("connection.test.key"); err != nil {
 		t.Error(err)
 	}
-	if err := deleteIfExists("client.test.pem"); err != nil {
+	if err := deleteIfExists("connection.test.pem"); err != nil {
 		t.Error(err)
 	}
 	if err := deleteIfExists("./tests/mail.guerrillamail.com.key.pem"); err != nil {
@@ -200,21 +200,21 @@ func TestTLSConfig(t *testing.T) {
 		t.Fatal("couldn't create rootca.test.pem file.", err)
 		return
 	}
-	if err := ioutil.WriteFile("client.test.key", []byte(clientPrvKey), 0644); err != nil {
-		t.Fatal("couldn't create client.test.key file.", err)
+	if err := ioutil.WriteFile("connection.test.key", []byte(clientPrvKey), 0644); err != nil {
+		t.Fatal("couldn't create connection.test.key file.", err)
 		return
 	}
-	if err := ioutil.WriteFile("client.test.pem", []byte(clientPubKey), 0644); err != nil {
-		t.Fatal("couldn't create client.test.pem file.", err)
+	if err := ioutil.WriteFile("connection.test.pem", []byte(clientPubKey), 0644); err != nil {
+		t.Fatal("couldn't create connection.test.pem file.", err)
 		return
 	}
 
-	s := server{}
+	s := Server{}
 	s.setConfig(&ServerConfig{
 		TLS: ServerTLSConfig{
 			StartTLSOn:     true,
-			PrivateKeyFile: "client.test.key",
-			PublicKeyFile:  "client.test.pem",
+			PrivateKeyFile: "connection.test.key",
+			PublicKeyFile:  "connection.test.pem",
 			RootCAs:        "rootca.test.pem",
 			ClientAuthType: "NoClientCert",
 			Curves:         []string{"P521", "P384"},
@@ -272,15 +272,15 @@ func TestHandleClient(t *testing.T) {
 		mainlog.WithError(logOpenError).Errorf("Failed creating a logger for mock conn [%s]", sc.ListenInterface)
 	}
 	conn, server := getMockServerConn(sc, t)
-	// call the serve.handleClient() func in a goroutine.
-	client := NewClient(conn.Server, 1, mainlog, mail.NewPool(5))
+	// call the serve.handleConn() func in a goroutine.
+	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		server.handleClient(client)
+		server.handleConn(client)
 		wg.Done()
 	}()
-	// Wait for the greeting from the server
+	// Wait for the greeting from the Server
 	r := textproto.NewReader(bufio.NewReader(conn.Client))
 	line, _ := r.ReadLine()
 	//	fmt.Println(line)
@@ -299,7 +299,7 @@ func TestHandleClient(t *testing.T) {
 	if strings.Index(line, expected) != 0 {
 		t.Error("expected", expected, "but got:", line)
 	}
-	wg.Wait() // wait for handleClient to exit
+	wg.Wait() // wait for handleConn to exit
 }
 
 func TestGithubIssue197(t *testing.T) {
@@ -317,14 +317,14 @@ func TestGithubIssue197(t *testing.T) {
 	// [2001:DB8::FF00:42:8329] is an address literal
 	server.setAllowedHosts([]string{"1.1.1.1", "[2001:DB8::FF00:42:8329]"})
 
-	client := NewClient(conn.Server, 1, mainlog, mail.NewPool(5))
+	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		server.handleClient(client)
+		server.handleConn(client)
 		wg.Done()
 	}()
-	// Wait for the greeting from the server
+	// Wait for the greeting from the Server
 	r := textproto.NewReader(bufio.NewReader(conn.Client))
 	line, _ := r.ReadLine()
 	//	fmt.Println(line)
@@ -382,7 +382,7 @@ func TestGithubIssue197(t *testing.T) {
 	if strings.Index(line, expected) != 0 {
 		t.Error("expected", expected, "but got:", line)
 	}
-	wg.Wait() // wait for handleClient to exit
+	wg.Wait() // wait for handleConn to exit
 }
 
 var githubIssue198data string
@@ -429,16 +429,16 @@ func TestGithubIssue198(t *testing.T) {
 
 	server.setAllowedHosts([]string{"1.1.1.1", "[2001:DB8::FF00:42:8329]"})
 
-	client := NewClient(conn.Server, 1, mainlog, mail.NewPool(5))
-	client.RemoteIP = "127.0.0.1"
+	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
+	client.RemoteAddr = "127.0.0.1"
 
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		server.handleClient(client)
+		server.handleConn(client)
 		wg.Done()
 	}()
-	// Wait for the greeting from the server
+	// Wait for the greeting from the Server
 	r := textproto.NewReader(bufio.NewReader(conn.Client))
 	line, _ := r.ReadLine()
 
@@ -488,10 +488,10 @@ func TestGithubIssue198(t *testing.T) {
 	if strings.Index(line, expected) != 0 {
 		t.Error("expected", expected, "but got:", line)
 	}
-	wg.Wait() // wait for handleClient to exit
+	wg.Wait() // wait for handleConn to exit
 }
 
-func sendMessage(greet string, TLS bool, w *textproto.Writer, t *testing.T, line string, r *textproto.Reader, err error, client *client) string {
+func sendMessage(greet string, TLS bool, w *textproto.Writer, t *testing.T, line string, r *textproto.Reader, err error, client *connection) string {
 	if err := w.PrintfLine(greet + " test.test.com"); err != nil {
 		t.Error(err)
 	}
@@ -538,18 +538,18 @@ func TestGithubIssue199(t *testing.T) {
 		mainlog.WithError(logOpenError).Errorf("Failed creating a logger for mock conn [%s]", sc.ListenInterface)
 	}
 	conn, server := getMockServerConn(sc, t)
-	server.backend().Start()
+	server.backend.Start()
 
 	server.setAllowedHosts([]string{"grr.la", "fake.com", "[1.1.1.1]", "[2001:db8::8a2e:370:7334]", "saggydimes.test.com"})
 
-	client := NewClient(conn.Server, 1, mainlog, mail.NewPool(5))
+	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		server.handleClient(client)
+		server.handleConn(client)
 		wg.Done()
 	}()
-	// Wait for the greeting from the server
+	// Wait for the greeting from the Server
 	r := textproto.NewReader(bufio.NewReader(conn.Client))
 	line, _ := r.ReadLine()
 	//	fmt.Println(line)
@@ -567,10 +567,10 @@ func TestGithubIssue199(t *testing.T) {
 	line, _ = r.ReadLine()
 	// [SPACE][SPACE]yo--[SPACE]man[SPACE]wazz'''up?[SPACE]surprise[SPACE]surprise,[SPACE]this[SPACE]is[SPACE]POSSIBLE@fake.com[SPACE]
 	if client.parser.LocalPart != "  yo-- man wazz'''up? surprise surprise, this is POSSIBLE@fake.com " {
-		t.Error("expecting local part: [  yo-- man wazz'''up? surprise surprise, this is POSSIBLE@fake.com ], got client.parser.LocalPart")
+		t.Error("expecting local part: [  yo-- man wazz'''up? surprise surprise, this is POSSIBLE@fake.com ], got connection.parser.LocalPart")
 	}
 	if !client.parser.LocalPartQuotes {
-		t.Error("was expecting client.parser.LocalPartQuotes true, got false")
+		t.Error("was expecting connection.parser.LocalPartQuotes true, got false")
 	}
 	// from should just as above but without angle brackets <>
 	if from := client.MailFrom.String(); from != "\"  yo-- man wazz'''up? surprise surprise, this is POSSIBLE@fake.com \"@example.com" {
@@ -704,7 +704,7 @@ func TestGithubIssue199(t *testing.T) {
 	}
 	line, _ = r.ReadLine()
 
-	wg.Wait() // wait for handleClient to exit
+	wg.Wait() // wait for handleConn to exit
 }
 
 func TestGithubIssue200(t *testing.T) {
@@ -720,14 +720,14 @@ func TestGithubIssue200(t *testing.T) {
 	server.backend().Start()
 	server.setAllowedHosts([]string{"1.1.1.1", "[2001:DB8::FF00:42:8329]"})
 
-	client := NewClient(conn.Server, 1, mainlog, mail.NewPool(5))
+	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		server.handleClient(client)
+		server.handleConn(client)
 		wg.Done()
 	}()
-	// Wait for the greeting from the server
+	// Wait for the greeting from the Server
 	r := textproto.NewReader(bufio.NewReader(conn.Client))
 	line, _ := r.ReadLine()
 	//	fmt.Println(line)
@@ -756,7 +756,7 @@ func TestGithubIssue200(t *testing.T) {
 	if strings.Index(line, expected) != 0 {
 		t.Error("expected", expected, "but got:", line)
 	}
-	wg.Wait() // wait for handleClient to exit
+	wg.Wait() // wait for handleConn to exit
 }
 
 func TestGithubIssue201(t *testing.T) {
@@ -770,18 +770,18 @@ func TestGithubIssue201(t *testing.T) {
 	}
 	conn, server := getMockServerConn(sc, t)
 	server.backend().Start()
-	// note that saggydimes.test.com is the hostname of the server, it comes form the config
+	// note that saggydimes.test.com is the hostname of the Server, it comes form the config
 	// it will be used for rcpt to:<postmaster> which does not specify a host
 	server.setAllowedHosts([]string{"a.com", "saggydimes.test.com"})
 
-	client := NewClient(conn.Server, 1, mainlog, mail.NewPool(5))
+	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		server.handleClient(client)
+		server.handleConn(client)
 		wg.Done()
 	}()
-	// Wait for the greeting from the server
+	// Wait for the greeting from the Server
 	r := textproto.NewReader(bufio.NewReader(conn.Client))
 	line, _ := r.ReadLine()
 	//	fmt.Println(line)
@@ -827,11 +827,11 @@ func TestGithubIssue201(t *testing.T) {
 	}
 	// the local part should be just "postmaster" (normalized)
 	if client.parser.LocalPart != "postmaster" {
-		t.Error("client.parser.LocalPart was not postmaster, got:", client.parser.LocalPart)
+		t.Error("connection.parser.LocalPart was not postmaster, got:", client.parser.LocalPart)
 	}
 
 	if client.parser.LocalPartQuotes {
-		t.Error("client.parser.LocalPartQuotes was true, expecting false")
+		t.Error("connection.parser.LocalPartQuotes was true, expecting false")
 	}
 
 	if err := w.PrintfLine("QUIT"); err != nil {
@@ -843,7 +843,7 @@ func TestGithubIssue201(t *testing.T) {
 	if strings.Index(line, expected) != 0 {
 		t.Error("expected", expected, "but got:", line)
 	}
-	wg.Wait() // wait for handleClient to exit
+	wg.Wait() // wait for handleConn to exit
 }
 
 func TestXClient(t *testing.T) {
@@ -857,15 +857,15 @@ func TestXClient(t *testing.T) {
 		mainlog.WithError(logOpenError).Errorf("Failed creating a logger for mock conn [%s]", sc.ListenInterface)
 	}
 	conn, server := getMockServerConn(sc, t)
-	// call the serve.handleClient() func in a goroutine.
-	client := NewClient(conn.Server, 1, mainlog, mail.NewPool(5))
+	// call the serve.handleConn() func in a goroutine.
+	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		server.handleClient(client)
+		server.handleConn(client)
 		wg.Done()
 	}()
-	// Wait for the greeting from the server
+	// Wait for the greeting from the Server
 	r := textproto.NewReader(bufio.NewReader(conn.Client))
 	line, _ := r.ReadLine()
 	//	fmt.Println(line)
@@ -880,8 +880,8 @@ func TestXClient(t *testing.T) {
 	}
 	line, _ = r.ReadLine()
 
-	if client.RemoteIP != "212.96.64.216" {
-		t.Error("client.RemoteIP should be 212.96.64.216, but got:", client.RemoteIP)
+	if client.RemoteAddr != "212.96.64.216" {
+		t.Error("connection.RemoteAddr should be 212.96.64.216, but got:", client.RemoteAddr)
 	}
 	expected := "250 2.1.0 OK"
 	if strings.Index(line, expected) != 0 {
@@ -903,7 +903,7 @@ func TestXClient(t *testing.T) {
 		t.Error(err)
 	}
 	line, _ = r.ReadLine()
-	wg.Wait() // wait for handleClient to exit
+	wg.Wait() // wait for handleConn to exit
 }
 
 func TestProxy(t *testing.T) {
@@ -917,15 +917,15 @@ func TestProxy(t *testing.T) {
 		mainlog.WithError(logOpenError).Errorf("Failed creating a logger for mock conn [%s]", sc.ListenInterface)
 	}
 	conn, server := getMockServerConn(sc, t)
-	// call the serve.handleClient() func in a goroutine.
-	client := NewClient(conn.Server, 1, mainlog, mail.NewPool(5))
+	// call the serve.handleConn() func in a goroutine.
+	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		server.handleClient(client)
+		server.handleConn(client)
 		wg.Done()
 	}()
-	// Wait for the greeting from the server
+	// Wait for the greeting from the Server
 	r := textproto.NewReader(bufio.NewReader(conn.Client))
 	line, _ := r.ReadLine()
 
@@ -935,12 +935,12 @@ func TestProxy(t *testing.T) {
 		t.Error(err)
 	}
 	// We do not expect anything back from the PROXY command
-	// TODO: For some reason, client.RemoteIP contains "tcp" - whereever this
+	// TODO: For some reason, connection.RemoteAddr contains "tcp" - whereever this
 	//       may come from. Therefore for now we're skipping the test if the
 	//       parsing was successfull.
 	/*
-		if client.RemoteIP != "1.2.3.4" {
-			t.Error("client.RemoteIP should be 1.2.3.4, but got:", client.RemoteIP)
+		if connection.RemoteAddr != "1.2.3.4" {
+			t.Error("connection.RemoteAddr should be 1.2.3.4, but got:", connection.RemoteAddr)
 		}
 	*/
 	// try malformed input
@@ -958,7 +958,7 @@ func TestProxy(t *testing.T) {
 		t.Error(err)
 	}
 	line, _ = r.ReadLine()
-	wg.Wait() // wait for handleClient to exit
+	wg.Wait() // wait for handleConn to exit
 }
 
 // The getBackend gateway should time out after 1 second because it sleeps for 2 sec.
@@ -986,7 +986,7 @@ func TestGatewayTimeout(t *testing.T) {
 	err := d.Start()
 
 	if err != nil {
-		t.Error("server didn't start")
+		t.Error("Server didn't start")
 	} else {
 
 		conn, err := net.Dial("tcp", "127.0.0.1:2525")
@@ -1073,7 +1073,7 @@ func TestGatewayPanic(t *testing.T) {
 	err := d.Start()
 
 	if err != nil {
-		t.Error("server didn't start")
+		t.Error("Server didn't start")
 	} else {
 
 		conn, err := net.Dial("tcp", "127.0.0.1:2525")
@@ -1093,7 +1093,7 @@ func TestGatewayPanic(t *testing.T) {
 		}
 		// perform 2 transactions
 		// both should timeout. The reason why 2 is because we want to make
-		// sure that the client waits until processing finishes, and the
+		// sure that the connection waits until processing finishes, and the
 		// timeout event is captured.
 		for i := 0; i < 2; i++ {
 			if _, err := fmt.Fprint(conn, "MAIL FROM:<test@example.com>r\r\n"); err != nil {
@@ -1142,7 +1142,7 @@ func TestGatewayPanic(t *testing.T) {
 
 func TestAllowsHosts(t *testing.T) {
 	defer cleanTestArtifacts(t)
-	s := server{}
+	s := Server{}
 	allowedHosts := []string{
 		"spam4.me",
 		"grr.la",

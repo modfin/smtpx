@@ -112,253 +112,208 @@ var codeMap = struct {
 	EnhancedStatusCode{ClassPermanentFailure, ".7.27"}:                                 550,
 }}
 
-var (
-	// Canned is to be read-only, except in the init() function
-	Canned Responses
-)
-
-// Responses has some already pre-constructed responses
-type Responses struct {
-
-	// The 500's
-	FailLineTooLong              *Response
-	FailNestedMailCmd            *Response
-	FailNoSenderDataCmd          *Response
-	FailNoRecipientsDataCmd      *Response
-	FailUnrecognizedCmd          *Response
-	FailMaxUnrecognizedCmd       *Response
-	FailSyntaxError              *Response
-	FailReadLimitExceededDataCmd *Response
-	FailMessageSizeExceeded      *Response
-	FailReadErrorDataCmd         *Response
-	FailPathTooLong              *Response
-	FailInvalidAddress           *Response
-	FailLocalPartTooLong         *Response
-	FailDomainTooLong            *Response
-	FailBackendNotRunning        *Response
-	FailBackendTransaction       *Response
-	FailBackendTimeout           *Response
-	FailRcptCmd                  *Response
-
-	// The 400's
-	ErrorTooManyRecipients *Response
-	ErrorRelayDenied       *Response
-	ErrorShutdown          *Response
-
-	// The 200's
-	SuccessMailCmd       *Response
-	SuccessRcptCmd       *Response
-	SuccessResetCmd      *Response
-	SuccessVerifyCmd     *Response
-	SuccessNoopCmd       *Response
-	SuccessQuitCmd       *Response
-	SuccessDataCmd       *Response
-	SuccessStartTLSCmd   *Response
-	SuccessMessageQueued *Response
+var FailLineTooLong = &Response{
+	EnhancedCode: InvalidCommand,
+	BasicCode:    554,
+	Class:        ClassPermanentFailure,
+	Comment:      "Line too long.",
 }
 
-// Called automatically during package load to build up the Responses struct
-func init() {
+var FailNestedMailCmd = &Response{
+	EnhancedCode: InvalidCommand,
+	BasicCode:    503,
+	Class:        ClassPermanentFailure,
+	Comment:      "Error: nested MAIL command",
+}
 
-	Canned = Responses{}
+var SuccessMailCmd = &Response{
+	EnhancedCode: OtherAddressStatus,
+	Class:        ClassSuccess,
+}
 
-	Canned.FailLineTooLong = &Response{
-		EnhancedCode: InvalidCommand,
-		BasicCode:    554,
-		Class:        ClassPermanentFailure,
-		Comment:      "Line too long.",
-	}
+var SuccessRcptCmd = &Response{
+	EnhancedCode: DestinationMailboxAddressValid,
+	Class:        ClassSuccess,
+}
 
-	Canned.FailNestedMailCmd = &Response{
-		EnhancedCode: InvalidCommand,
-		BasicCode:    503,
-		Class:        ClassPermanentFailure,
-		Comment:      "Error: nested MAIL command",
-	}
+var SuccessResetCmd = SuccessMailCmd
 
-	Canned.SuccessMailCmd = &Response{
-		EnhancedCode: OtherAddressStatus,
-		Class:        ClassSuccess,
-	}
+var SuccessNoopCmd = &Response{
+	EnhancedCode: OtherStatus,
+	Class:        ClassSuccess,
+}
 
-	Canned.SuccessRcptCmd = &Response{
-		EnhancedCode: DestinationMailboxAddressValid,
-		Class:        ClassSuccess,
-	}
+var SuccessVerifyCmd = &Response{
+	EnhancedCode: OtherOrUndefinedProtocolStatus,
+	BasicCode:    252,
+	Class:        ClassSuccess,
+	Comment:      "Cannot verify user",
+}
 
-	Canned.SuccessResetCmd = Canned.SuccessMailCmd
+var ErrorTooManyRecipients = &Response{
+	EnhancedCode: TooManyRecipients,
+	BasicCode:    452,
+	Class:        ClassTransientFailure,
+	Comment:      "Too many recipients",
+}
 
-	Canned.SuccessNoopCmd = &Response{
-		EnhancedCode: OtherStatus,
-		Class:        ClassSuccess,
-	}
+var ErrorRelayDenied = &Response{
+	EnhancedCode: BadDestinationMailboxAddress,
+	BasicCode:    454,
+	Class:        ClassTransientFailure,
+	Comment:      "Error: Relay access denied:",
+}
 
-	Canned.SuccessVerifyCmd = &Response{
-		EnhancedCode: OtherOrUndefinedProtocolStatus,
-		BasicCode:    252,
-		Class:        ClassSuccess,
-		Comment:      "Cannot verify user",
-	}
+var SuccessQuitCmd = &Response{
+	EnhancedCode: OtherStatus,
+	BasicCode:    221,
+	Class:        ClassSuccess,
+	Comment:      "Bye",
+}
 
-	Canned.ErrorTooManyRecipients = &Response{
-		EnhancedCode: TooManyRecipients,
-		BasicCode:    452,
-		Class:        ClassTransientFailure,
-		Comment:      "Too many recipients",
-	}
+var FailNoSenderDataCmd = &Response{
+	EnhancedCode: InvalidCommand,
+	BasicCode:    503,
+	Class:        ClassPermanentFailure,
+	Comment:      "Error: No sender",
+}
 
-	Canned.ErrorRelayDenied = &Response{
-		EnhancedCode: BadDestinationMailboxAddress,
-		BasicCode:    454,
-		Class:        ClassTransientFailure,
-		Comment:      "Error: Relay access denied:",
-	}
+var FailNoRecipientsDataCmd = &Response{
+	EnhancedCode: InvalidCommand,
+	BasicCode:    503,
+	Class:        ClassPermanentFailure,
+	Comment:      "Error: No recipients",
+}
 
-	Canned.SuccessQuitCmd = &Response{
-		EnhancedCode: OtherStatus,
-		BasicCode:    221,
-		Class:        ClassSuccess,
-		Comment:      "Bye",
-	}
+var SuccessDataCmd = &Response{
+	BasicCode: 354,
+	Comment:   "354 Enter message, ending with '.' on a line by itself",
+}
 
-	Canned.FailNoSenderDataCmd = &Response{
-		EnhancedCode: InvalidCommand,
-		BasicCode:    503,
-		Class:        ClassPermanentFailure,
-		Comment:      "Error: No sender",
-	}
+var SuccessStartTLSCmd = &Response{
+	EnhancedCode: OtherStatus,
+	BasicCode:    220,
+	Class:        ClassSuccess,
+	Comment:      "Ready to start TLS",
+}
 
-	Canned.FailNoRecipientsDataCmd = &Response{
-		EnhancedCode: InvalidCommand,
-		BasicCode:    503,
-		Class:        ClassPermanentFailure,
-		Comment:      "Error: No recipients",
-	}
+var FailUnrecognizedCmd = &Response{
+	EnhancedCode: InvalidCommand,
+	BasicCode:    554,
+	Class:        ClassPermanentFailure,
+	Comment:      "Unrecognized command",
+}
 
-	Canned.SuccessDataCmd = &Response{
-		BasicCode: 354,
-		Comment:   "354 Enter message, ending with '.' on a line by itself",
-	}
+var FailMaxUnrecognizedCmd = &Response{
+	EnhancedCode: InvalidCommand,
+	BasicCode:    554,
+	Class:        ClassPermanentFailure,
+	Comment:      "Too many unrecognized commands",
+}
 
-	Canned.SuccessStartTLSCmd = &Response{
-		EnhancedCode: OtherStatus,
-		BasicCode:    220,
-		Class:        ClassSuccess,
-		Comment:      "Ready to start TLS",
-	}
+var ErrorShutdown = &Response{
+	EnhancedCode: OtherOrUndefinedMailSystemStatus,
+	BasicCode:    421,
+	Class:        ClassTransientFailure,
+	Comment:      "Server is shutting down. Please try again later. Sayonara!",
+}
 
-	Canned.FailUnrecognizedCmd = &Response{
-		EnhancedCode: InvalidCommand,
-		BasicCode:    554,
-		Class:        ClassPermanentFailure,
-		Comment:      "Unrecognized command",
-	}
+var FailSyntaxError = &Response{
+	EnhancedCode: SyntaxError,
+	BasicCode:    550,
+	Class:        ClassPermanentFailure,
+	Comment:      "Syntax error",
+}
 
-	Canned.FailMaxUnrecognizedCmd = &Response{
-		EnhancedCode: InvalidCommand,
-		BasicCode:    554,
-		Class:        ClassPermanentFailure,
-		Comment:      "Too many unrecognized commands",
-	}
+var FailReadLimitExceededDataCmd = &Response{
+	EnhancedCode: MessageLengthExceedsAdministrativeLimit,
+	BasicCode:    550,
+	Class:        ClassPermanentFailure,
+	Comment:      "Error:",
+}
 
-	Canned.ErrorShutdown = &Response{
-		EnhancedCode: OtherOrUndefinedMailSystemStatus,
-		BasicCode:    421,
-		Class:        ClassTransientFailure,
-		Comment:      "Server is shutting down. Please try again later. Sayonara!",
-	}
+var FailMessageSizeExceeded = &Response{
+	EnhancedCode: OtherOrUndefinedNetworkOrRoutingStatus,
+	BasicCode:    552,
+	Class:        ClassPermanentFailure,
+	Comment:      "Error:",
+}
 
-	Canned.FailSyntaxError = &Response{
-		EnhancedCode: SyntaxError,
-		BasicCode:    550,
-		Class:        ClassPermanentFailure,
-		Comment:      "Syntax error",
-	}
+var FailReadErrorDataCmd = &Response{
+	EnhancedCode: OtherOrUndefinedMailSystemStatus,
+	BasicCode:    451,
+	Class:        ClassTransientFailure,
+	Comment:      "Error:",
+}
 
-	Canned.FailReadLimitExceededDataCmd = &Response{
-		EnhancedCode: MessageLengthExceedsAdministrativeLimit,
-		BasicCode:    550,
-		Class:        ClassPermanentFailure,
-		Comment:      "Error:",
-	}
+var FailPathTooLong = &Response{
+	EnhancedCode: InvalidCommandArguments,
+	BasicCode:    550,
+	Class:        ClassPermanentFailure,
+	Comment:      "Path too long",
+}
 
-	Canned.FailMessageSizeExceeded = &Response{
-		EnhancedCode: OtherOrUndefinedNetworkOrRoutingStatus,
-		BasicCode:    552,
-		Class:        ClassPermanentFailure,
-		Comment:      "Error:",
-	}
+var FailInvalidAddress = &Response{
+	EnhancedCode: InvalidCommandArguments,
+	BasicCode:    501,
+	Class:        ClassPermanentFailure,
+	Comment:      "Invalid address",
+}
 
-	Canned.FailReadErrorDataCmd = &Response{
-		EnhancedCode: OtherOrUndefinedMailSystemStatus,
-		BasicCode:    451,
-		Class:        ClassTransientFailure,
-		Comment:      "Error:",
-	}
+var FailCommandNotImplemented = &Response{
+	EnhancedCode: InvalidCommand,
+	BasicCode:    502,
+	Class:        ClassPermanentFailure,
+	Comment:      "Command not implemented",
+}
 
-	Canned.FailPathTooLong = &Response{
-		EnhancedCode: InvalidCommandArguments,
-		BasicCode:    550,
-		Class:        ClassPermanentFailure,
-		Comment:      "Path too long",
-	}
+var FailLocalPartTooLong = &Response{
+	EnhancedCode: InvalidCommandArguments,
+	BasicCode:    550,
+	Class:        ClassPermanentFailure,
+	Comment:      "Local part too long, cannot exceed 64 characters",
+}
 
-	Canned.FailInvalidAddress = &Response{
-		EnhancedCode: InvalidCommandArguments,
-		BasicCode:    501,
-		Class:        ClassPermanentFailure,
-		Comment:      "Invalid address",
-	}
+var FailDomainTooLong = &Response{
+	EnhancedCode: InvalidCommandArguments,
+	BasicCode:    550,
+	Class:        ClassPermanentFailure,
+	Comment:      "Domain cannot exceed 255 characters",
+}
 
-	Canned.FailLocalPartTooLong = &Response{
-		EnhancedCode: InvalidCommandArguments,
-		BasicCode:    550,
-		Class:        ClassPermanentFailure,
-		Comment:      "Local part too long, cannot exceed 64 characters",
-	}
+var FailBackendNotRunning = &Response{
+	EnhancedCode: OtherOrUndefinedProtocolStatus,
+	BasicCode:    554,
+	Class:        ClassPermanentFailure,
+	Comment:      "Transaction failed - backend not running",
+}
 
-	Canned.FailDomainTooLong = &Response{
-		EnhancedCode: InvalidCommandArguments,
-		BasicCode:    550,
-		Class:        ClassPermanentFailure,
-		Comment:      "Domain cannot exceed 255 characters",
-	}
+var FailBackendTransaction = &Response{
+	EnhancedCode: OtherOrUndefinedProtocolStatus,
+	BasicCode:    554,
+	Class:        ClassPermanentFailure,
+	Comment:      "Error:",
+}
 
-	Canned.FailBackendNotRunning = &Response{
-		EnhancedCode: OtherOrUndefinedProtocolStatus,
-		BasicCode:    554,
-		Class:        ClassPermanentFailure,
-		Comment:      "Transaction failed - backend not running",
-	}
+var SuccessMessageQueued = &Response{
+	EnhancedCode: OtherStatus,
+	BasicCode:    250,
+	Class:        ClassSuccess,
+	Comment:      "OK: queued as",
+}
 
-	Canned.FailBackendTransaction = &Response{
-		EnhancedCode: OtherOrUndefinedProtocolStatus,
-		BasicCode:    554,
-		Class:        ClassPermanentFailure,
-		Comment:      "Error:",
-	}
+var FailBackendTimeout = &Response{
+	EnhancedCode: OtherOrUndefinedProtocolStatus,
+	BasicCode:    554,
+	Class:        ClassPermanentFailure,
+	Comment:      "Error: transaction timeout",
+}
 
-	Canned.SuccessMessageQueued = &Response{
-		EnhancedCode: OtherStatus,
-		BasicCode:    250,
-		Class:        ClassSuccess,
-		Comment:      "OK: queued as",
-	}
-
-	Canned.FailBackendTimeout = &Response{
-		EnhancedCode: OtherOrUndefinedProtocolStatus,
-		BasicCode:    554,
-		Class:        ClassPermanentFailure,
-		Comment:      "Error: transaction timeout",
-	}
-
-	Canned.FailRcptCmd = &Response{
-		EnhancedCode: BadDestinationMailboxAddress,
-		BasicCode:    550,
-		Class:        ClassPermanentFailure,
-		Comment:      "User unknown in local recipient table",
-	}
-
+var FailRcptCmd = &Response{
+	EnhancedCode: BadDestinationMailboxAddress,
+	BasicCode:    550,
+	Class:        ClassPermanentFailure,
+	Comment:      "User unknown in local recipient table",
 }
 
 // DefaultMap contains defined default codes (RfC 3463)

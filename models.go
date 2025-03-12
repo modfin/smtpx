@@ -3,6 +3,7 @@ package guerrilla
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -61,4 +62,43 @@ func newSMTPBufferedReader(rd io.Reader) *smtpBufferedReader {
 	alr := newAdjustableLimitedReader(rd, CommandLineMaxLength)
 	s := &smtpBufferedReader{bufio.NewReader(alr), alr}
 	return s
+}
+
+// Result represents a response to an SMTP connection after receiving DATA.
+// The String method should return an SMTP message ready to send back to the
+// connection, for example `250 OK: Message received`.
+type Result interface {
+	fmt.Stringer
+	// Code should return the SMTP code associated with this response, ie. `250`
+	Code() int
+	Class() int
+}
+
+type result struct {
+	code int
+	str  string
+}
+
+func (r result) String() string {
+	var clazz string
+	switch r.code / 100 {
+	case 2:
+		clazz = "OK"
+	case 4:
+		clazz = "Temporary failure"
+	case 5:
+		clazz = "Permanent failure"
+	}
+	return fmt.Sprintf("%d %s: %s", r.code, clazz, r.str)
+}
+
+func (r result) Code() int {
+	return r.code
+}
+func (r result) Class() int {
+	return r.code / 100
+}
+
+func NewResult(code int, str string) Result {
+	return result{code: code, str: str}
 }

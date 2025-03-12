@@ -2,18 +2,18 @@ package guerrilla
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
-	"path/filepath"
-	"strings"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/phires/go-guerrilla/backends"
 	"github.com/phires/go-guerrilla/mail"
 	"github.com/phires/go-guerrilla/mail/rfc5321"
 	"github.com/phires/go-guerrilla/response"
@@ -22,12 +22,13 @@ import (
 const (
 	CommandVerbMaxLength = 16
 	CommandLineMaxLength = 1024
+
 	// Number of allowed unrecognized commands before we terminate the connection
 	MaxUnrecognizedCommands = 5
 )
 
 const (
-	// server has just been created
+	// Server has just been created
 	ServerStateNew = iota
 	// Server has just been stopped
 	ServerStateStopped
@@ -37,23 +38,77 @@ const (
 	ServerStateStartError
 )
 
+const defaultMaxClients = 100
+const defaultTimeout = 30
+const defaultInterface = ":2525"
+const defaultMaxSize = 10_485_760 // int64(10 << 20) // 10 Megabytes
+
 // Server listens for SMTP clients on the port specified in its config
-type server struct {
-	serverConfig    *ServerConfig // stores guerrilla.ServerConfig
-	tlsConfigStore  atomic.Value
-	timeout         atomic.Value // stores time.Duration
-	listenInterface string
-	clientPool      *Pool
-	wg              sync.WaitGroup // for waiting to shutdown
-	listener        net.Listener
-	closedListener  chan bool
-	hosts           allowedHosts // stores map[string]bool for faster lookup
-	state           int
+type Server struct {
+	TLSConfig *tls.Config
+	// AlwaysOn run this Server as a pure TLS Server, i.e. SMTPS
+	TLSAlwaysOn bool
 
-	backend      backends.Backend
-	envelopePool *mail.Pool
+	// Hostname will be used in the Server's reply to HELO/EHLO. If TLS enabled
+	// make sure that the Hostname matches the cert. Defaults to os.Hostname()
+	// Hostname will also be used to fill the 'Host' property when the "RCPT TO" address is
+	// addressed to just <postmaster>
+	Hostname string
 
-	logger *slog.Logger
+	// Addr is the interface specified in <ip>:<port> - defaults to ":25"
+	Addr string
+
+	// MaxSize is the maximum size of an email that will be accepted for delivery.
+	// Defaults to 10 Mebibytes
+	MaxSize int64
+	// Timeout specifies the connection timeout in seconds. Defaults to 30
+	Timeout int
+	// MaxClients controls how many maximum clients we can handle at once.
+	// Defaults to defaultMaxClients
+	MaxClients int
+
+	// XClientOn when using a proxy such as Nginx, XCLIENT command is used to pass the
+	// original connection's IP address & connection's HELO
+	XClientOn bool
+	ProxyOn   bool
+
+	listener         net.Listener
+	closedListener   chan struct{}
+	wgConnections    sync.WaitGroup
+	countConnections atomic.Int64
+
+	state int
+
+	backend Backend
+	logger  *slog.Logger
+}
+
+func (c *Server) setDefaults() error {
+	if c.logger == nil {
+		c.logger = noopLogger()
+	}
+
+	if c.Addr == "" {
+		c.Addr = defaultInterface
+	}
+	if c.Hostname == "" {
+		h, err := os.Hostname()
+		if err != nil {
+			return err
+		}
+		c.Hostname = h
+	}
+	if c.MaxClients == 0 {
+		c.MaxClients = defaultMaxClients
+	}
+	if c.Timeout == 0 {
+		c.Timeout = defaultTimeout
+	}
+	if c.MaxSize == 0 {
+		c.MaxSize = defaultMaxSize // 10 Mebibytes
+	}
+
+	return nil
 }
 
 type allowedHosts struct {
@@ -68,7 +123,7 @@ var (
 	cmdHELO     command = []byte("HELO")
 	cmdEHLO     command = []byte("EHLO")
 	cmdHELP     command = []byte("HELP")
-	cmdXCLIENT  command = []byte("XCLIENT")
+	cmdXCLIENT  command = []byte("XCLIENT ")
 	cmdMAIL     command = []byte("MAIL FROM:")
 	cmdRCPT     command = []byte("RCPT TO:")
 	cmdRSET     command = []byte("RSET")
@@ -77,154 +132,85 @@ var (
 	cmdQUIT     command = []byte("QUIT")
 	cmdDATA     command = []byte("DATA")
 	cmdSTARTTLS command = []byte("STARTTLS")
-	cmdPROXY    command = []byte("PROXY")
+	cmdPROXY    command = []byte("PROXY ")
 )
 
 func (c command) match(in []byte) bool {
-	return bytes.Index(in, []byte(c)) == 0
+	return bytes.HasPrefix(in, c)
 }
 
-// Set the timeout for the server and all clients
-func (s *server) setTimeout(seconds int) {
-	duration := time.Duration(int64(seconds))
-	s.clientPool.SetTimeout(duration)
-	s.timeout.Store(duration)
+func (c command) content(in []byte) []byte {
+	return bytes.TrimPrefix(in, c)
 }
 
-// goroutine safe config store
-func (s *server) setConfig(sc *ServerConfig) {
-	s.serverConfig = sc
-}
+// ListenAndServe begin accepting SMTP clients. Will block unless there is an error or Server.Shutdown() is called
+func (s *Server) ListenAndServe() error {
 
-// Set the allowed hosts for the server
-func (s *server) setAllowedHosts(allowedHosts []string) {
-	s.hosts.Lock()
-	defer s.hosts.Unlock()
-	s.hosts.table = make(map[string]bool, len(allowedHosts))
-	s.hosts.wildcards = nil
-	for _, h := range allowedHosts {
-		if strings.Contains(h, "*") {
-			s.hosts.wildcards = append(s.hosts.wildcards, strings.ToLower(h))
-		} else if len(h) > 5 && h[0] == '[' && h[len(h)-1] == ']' {
-			if ip := net.ParseIP(h[1 : len(h)-1]); ip != nil {
-				// this will save the normalized ip, as ip.String always returns ipv6 in short form
-				s.hosts.table["["+ip.String()+"]"] = true
-			}
-		} else {
-			s.hosts.table[strings.ToLower(h)] = true
-		}
-	}
-}
-
-// Begin accepting SMTP clients. Will block unless there is an error or server.Shutdown() is called
-func (s *server) Start() error {
 	var clientID uint64
-	clientID = 0
+	var err error
 
-	listener, err := net.Listen("tcp", s.listenInterface)
-	s.listener = listener
+	s.listener, err = net.Listen("tcp", s.Addr)
 	if err != nil {
 		s.state = ServerStateStartError
-		return fmt.Errorf("[%s] Cannot listen on port: %s ", s.listenInterface, err.Error())
+		return fmt.Errorf("cannot listen on %s, err %w ", s.Addr, err)
 	}
 
-	s.log().Info("Listening on TCP", "interface", s.listenInterface)
+	s.log().Info("Listening on TCP", "interface", s.Addr)
 	s.state = ServerStateRunning
 
 	for {
-		s.log().With("interface", s.listenInterface).Debug("Waiting for a new client", "next_client_id", clientID+1)
-		conn, err := listener.Accept()
+		s.log().Debug("Waiting for a new connection", "next_client_id", clientID+1, "interface", s.Addr)
+		conn, err := s.listener.Accept()
 		clientID++
 		if err != nil {
-			if e, ok := err.(net.Error); ok && !e.Temporary() {
-				s.log().With("interface", s.listenInterface).Info("Server has stopped accepting new clients")
-				// the listener has been closed, wait for clients to exit
-				s.log().With("interface", s.listenInterface).Info("shutting down pool")
-				s.clientPool.ShutdownState()
-				s.clientPool.ShutdownWait()
-				s.state = ServerStateStopped
-				s.closedListener <- true
-				return nil
-			}
-			s.log().Info("Temporary error accepting client", "err", err)
-			continue
+			// TODO error my be temporary?
+			s.log().With("interface", s.Addr).Info("Server has stopped accepting new clients")
+			s.state = ServerStateStopped
+			close(s.closedListener)
+			return nil
 		}
-		go func(p Poolable, borrowErr error) {
-			c := p.(*client)
-			if borrowErr == nil {
-				s.handleClient(c)
-				s.envelopePool.Return(c.Envelope)
-				s.clientPool.Return(c)
-			} else {
-				s.log().Info("couldn't borrow a new client", "err", borrowErr)
-				// we could not get a client, so close the connection.
-				_ = conn.Close()
 
-			}
-			// intentionally placed Borrow in args so that it's called in the
-			// same main goroutine.
-		}(s.clientPool.Borrow(conn, clientID, s.log(), s.envelopePool))
+		s.wgConnections.Add(1)
+		s.countConnections.Add(1)
+		go func(conn net.Conn, clientID uint64) {
+			defer s.wgConnections.Done()
+			defer s.countConnections.Add(-1)
+			defer conn.Close()
 
+			s.handleConn(newConnection(conn, clientID, s.logger))
+		}(conn, clientID)
 	}
 }
 
-func (s *server) Shutdown() {
+func (s *Server) Shutdown(ctx context.Context) error {
 	if s.listener != nil {
 		// This will cause Start function to return, by causing an error on listener.Accept
 		_ = s.listener.Close()
 		// wait for the listener to listener.Accept
-		<-s.closedListener
-		// At this point Start will exit and close down the pool
-	} else {
-		s.clientPool.ShutdownState()
-		// listener already closed, wait for clients to exit
-		s.clientPool.ShutdownWait()
-		s.state = ServerStateStopped
-	}
-}
-
-func (s *server) GetActiveClientsCount() int {
-	return s.clientPool.GetActiveClientsCount()
-}
-
-// Verifies that the host is a valid recipient.
-// host checking turned off if there is a single entry and it's a dot.
-func (s *server) allowsHost(host string) bool {
-	s.hosts.Lock()
-	defer s.hosts.Unlock()
-	// if hosts contains a single dot, further processing is skipped
-	if len(s.hosts.table) == 1 {
-		if _, ok := s.hosts.table["."]; ok {
-			return true
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context done, %w", ctx.Err())
+		case <-s.closedListener:
+			return nil
 		}
 	}
-	if _, ok := s.hosts.table[strings.ToLower(host)]; ok {
-		return true
-	}
-	// check the wildcards
-	for _, w := range s.hosts.wildcards {
-		if matched, err := filepath.Match(w, strings.ToLower(host)); matched && err == nil {
-			return true
-		}
-	}
-	return false
+	return nil
 }
 
-func (s *server) allowsIp(ip net.IP) bool {
-	ipStr := ip.String()
-	return s.allowsHost("[" + ipStr + "]")
+func (s *Server) GetActiveClientsCount() int {
+	return int(s.countConnections.Load())
 }
 
 const commandSuffix = "\r\n"
 
-// Reads from the client until a \n terminator is encountered,
+// Reads from the connection until a \n terminator is encountered,
 // or until a timeout occurs.
-func (s *server) readCommand(client *client) ([]byte, error) {
+func (s *Server) readCommand(conn *connection) ([]byte, error) {
 	//var input string
 	var err error
 	var bs []byte
 	// In command state, stop reading at line breaks
-	bs, err = client.bufin.ReadSlice('\n')
+	bs, err = conn.bufin.ReadSlice('\n')
 	if err != nil {
 		return bs, err
 	} else if bytes.HasSuffix(bs, []byte(commandSuffix)) {
@@ -233,35 +219,38 @@ func (s *server) readCommand(client *client) ([]byte, error) {
 	return bs[:len(bs)-1], err
 }
 
-// flushResponse a response to the client. Flushes the client.bufout buffer to the connection
-func (s *server) flushResponse(client *client) error {
-	if err := client.setTimeout(s.timeout.Load().(time.Duration)); err != nil {
+// flushResponse a response to the connection. Flushes the connection.bufout buffer to the connection
+func (s *Server) flushResponse(conn *connection) error {
+	if err := conn.setTimeout(time.Duration(s.Timeout) * time.Second); err != nil {
 		return err
 	}
-	return client.bufout.Flush()
+	return conn.bufout.Flush()
 }
 
-func (s *server) isShuttingDown() bool {
-	return s.clientPool.IsShuttingDown()
+func (s *Server) isShuttingDown() bool {
+	select {
+	case <-s.closedListener:
+		return true
+	default:
+		return false
+	}
 }
 
-// Handles an entire client SMTP exchange
-func (s *server) handleClient(client *client) {
-	defer client.closeConn()
-	sc := s.serverConfig
-	s.log().Info("Handle client", "ip", client.RemoteIP, "id", client.ID)
+// Handles an entire connection SMTP exchange
+func (s *Server) handleConn(conn *connection) {
+	defer conn.closeConn()
+	s.log().Info("Handle connection", "ip", conn.RemoteAddr, "id", conn.ClientId)
 
 	// Initial greeting
-	greeting := fmt.Sprintf("220 %s SMTP %s(%s) #%d (%d) %s",
-		sc.Hostname, Name, Version, client.ID,
-		s.clientPool.GetActiveClientsCount(), time.Now().Format(time.RFC3339))
+	greeting := fmt.Sprintf("220 %s SMTP %s(%s) #%d  %s",
+		s.Hostname, Name, Version, conn.ID, time.Now().Format(time.RFC3339))
 
-	helo := fmt.Sprintf("250 %s Hello", sc.Hostname)
+	helo := fmt.Sprintf("250 %s Hello", s.Hostname)
 	// ehlo is a multi-line reply and need additional \r\n at the end
-	ehlo := fmt.Sprintf("250-%s Hello\r\n", sc.Hostname)
+	ehlo := fmt.Sprintf("250-%s Hello\r\n", s.Hostname)
 
 	// Extended feature advertisements
-	messageSize := fmt.Sprintf("250-SIZE %d\r\n", sc.MaxSize)
+	messageSize := fmt.Sprintf("250-SIZE %d\r\n", s.MaxSize)
 	pipelining := "250-PIPELINING\r\n"
 	advertiseTLS := "250-STARTTLS\r\n"
 	advertiseEnhancedStatusCodes := "250-ENHANCEDSTATUSCODES\r\n"
@@ -269,49 +258,46 @@ func (s *server) handleClient(client *client) {
 	// Also, Last line has no dash -
 	help := "250 HELP"
 
-	if sc.TLS.AlwaysOn {
-		tlsConfig, ok := s.tlsConfigStore.Load().(*tls.Config)
-		if !ok {
-			s.log().Error("Failed to load *tls.Config")
-		} else if err := client.upgradeToTLS(tlsConfig); err == nil {
+	if s.TLSAlwaysOn && s.TLSConfig != nil {
+		if err := conn.upgradeTLS(s.TLSConfig); err == nil {
 			advertiseTLS = ""
 		} else {
-			s.log().Warn("Failed TLS handshake", "ip", client.RemoteIP, "err", err)
-			// server requires TLS, but can't handshake
-			client.kill()
+			s.log().Warn("Failed TLS handshake", "ip", conn.RemoteAddr, "err", err)
+			// Server requires TLS, but can't handshake
+			conn.kill()
+			// TODO just return ?
 		}
 	}
-	if !sc.TLS.StartTLSOn {
+	if s.TLSConfig == nil {
 		// STARTTLS turned off, don't advertise it
 		advertiseTLS = ""
 	}
-	r := response.Canned
-	for client.isAlive() {
-		switch client.state {
-		case ClientGreeting:
-			client.sendResponse(greeting)
-			client.state = ClientCmd
-		case ClientCmd:
-			client.bufin.setLimit(CommandLineMaxLength)
-			input, err := s.readCommand(client)
+	for conn.isAlive() {
+		switch conn.state {
+		case ConnGreeting:
+			conn.sendResponse(greeting)
+			conn.state = ConnCmd
+		case ConnCmd:
+			conn.bufin.setLimit(CommandLineMaxLength)
+			input, err := s.readCommand(conn)
 			s.log().Debug("Client sent:", "command", input)
 			if err == io.EOF {
-				s.log().Warn("Client closed the connection", "ip", client.RemoteIP, "err", err)
+				s.log().Warn("Client closed the connection", "ip", conn.RemoteAddr, "err", err)
 				return
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				s.log().Warn("Timeout", "ip", client.RemoteIP, "err", err)
+				s.log().Warn("Timeout", "ip", conn.RemoteAddr, "err", err)
 				return
 			} else if err == LineLimitExceeded {
-				client.sendResponse(r.FailLineTooLong)
-				client.kill()
+				conn.sendResponse(response.FailLineTooLong)
+				conn.kill()
 				break
 			} else if err != nil {
-				s.log().Warn("Read error", "ip", client.RemoteIP, "err", err)
-				client.kill()
+				s.log().Warn("Read error", "ip", conn.RemoteAddr, "err", err)
+				conn.kill()
 				break
 			}
 			if s.isShuttingDown() {
-				client.state = ClientShutdown
+				conn.state = ConnShutdown
 				continue
 			}
 
@@ -322,215 +308,290 @@ func (s *server) handleClient(client *client) {
 			cmd := bytes.ToUpper(input[:cmdLen])
 			switch {
 			case cmdHELO.match(cmd):
-				if h, err := client.parser.Helo(input[4:]); err == nil {
-					client.Helo = h
+				// Client: HELO example.com
+				// The client sends the HELO command, followed by its own fully qualified domain name (FQDN) or IP address.
+				// HELO is the older "Hello" command, used in basic SMTP sessions
+				//  (as opposed to the extended ESMTP sessions initiated by EHLO).
+				content := cmdHELO.content(cmd)
+				if h, err := conn.parser.Helo(content); err == nil {
+					conn.Helo = h
 				} else {
-					s.log().Warn("invalid helo", "helo", h, "client", client.ID)
-					client.sendResponse(r.FailSyntaxError)
+					s.log().Warn("invalid helo", "helo", h, "connection", conn.ID)
+					conn.sendResponse(response.FailSyntaxError)
 					break
 				}
-				client.resetTransaction()
-				client.sendResponse(helo)
+				conn.resetTransaction()
+				conn.sendResponse(helo)
+				continue
 
 			case cmdEHLO.match(cmd):
-				if h, _, err := client.parser.Ehlo(input[4:]); err == nil {
-					client.Helo = h
+				// Client: EHLO example.com
+				// The client sends the EHLO command, followed by its own fully qualified domain name (FQDN) or IP address.
+				// Client is saying "Hello, I am example.com, and I would like to establish an ESMTP connection."
+				content := cmdHELO.content(cmd)
+				if h, _, err := conn.parser.Ehlo(content); err == nil {
+					conn.Helo = h
 				} else {
-					client.sendResponse(r.FailSyntaxError)
-					s.log().Warn("invalid ehlo", "ehlo", h, "client", client.ID)
-					client.sendResponse(r.FailSyntaxError)
+					s.log().Warn("invalid ehlo", "ehlo", h, "connection", conn.ID)
+					conn.sendResponse(response.FailSyntaxError)
 					break
 				}
-				client.ESMTP = true
-				client.resetTransaction()
-				client.sendResponse(ehlo,
+				conn.ESMTP = true
+				conn.resetTransaction()
+				conn.sendResponse(ehlo,
 					messageSize,
 					pipelining,
 					advertiseTLS,
 					advertiseEnhancedStatusCodes,
 					help)
+				continue
 
 			case cmdHELP.match(cmd):
 				quote := response.GetQuote()
-				client.sendResponse("214-OK\r\n", quote)
+				conn.sendResponse("214-OK\r\n", quote)
+				continue
 
-			case sc.XClientOn && cmdXCLIENT.match(cmd):
-				if toks := bytes.Split(input[8:], []byte{' '}); len(toks) > 0 {
-					for i := range toks {
-						if vals := bytes.Split(toks[i], []byte{'='}); len(vals) == 2 {
-							if bytes.Equal(vals[1], []byte("[UNAVAILABLE]")) {
-								// skip
-								continue
-							}
-							if bytes.Equal(vals[0], []byte("ADDR")) {
-								client.RemoteIP = string(vals[1])
-							}
-							if bytes.Equal(vals[0], []byte("HELO")) {
-								client.Helo = string(vals[1])
-							}
+			case s.XClientOn && cmdXCLIENT.match(cmd):
+				// Client: XCLIENT ADDR=192.168.1.10 NAME=client.example.com PROTO=ESMTP AUTH=user@example.com
+				// The XCLIENT command is another Extended SMTP (ESMTP) command, but it's not standardized in the
+				// official RFCs. It's used by some mail servers, primarily Postfix, to provide client information to
+				// the server before the MAIL FROM command. This is particularly useful in situations where a proxy or
+				// load balancer is involved.
+				content := cmdXCLIENT.content(cmd)
+				toks := bytes.Split(content, []byte{' '})
+				for _, tok := range toks {
+					key, val, found := bytes.Cut(tok, []byte{'='})
+					if found {
+						if bytes.Equal(val, []byte("[UNAVAILABLE]")) {
+							continue
+						}
+						if bytes.Equal(key, []byte("ADDR")) {
+							ip := net.ParseIP(string(val))
+							conn.RemoteAddr = &net.TCPAddr{IP: ip}
+						}
+						if bytes.Equal(key, []byte("HELO")) {
+							conn.Helo = string(val)
 						}
 					}
 				}
-				client.sendResponse(r.SuccessMailCmd)
+				conn.sendResponse(response.SuccessMailCmd)
+				continue
 
-			case sc.ProxyOn && cmdPROXY.match(cmd):
-				if toks := bytes.Split(input[6:], []byte{' '}); len(toks) == 5 {
-					s.log().Debug("PROXY command.", "proto", toks[0], "source_ip", toks[1], "dest_ip", toks[2], "source_port", toks[3], "dest_port", toks[4])
-					client.RemoteIP = string(toks[1])
-					s.log().Debug("client.RemoteIP ", "ip", client.RemoteIP)
-					// There is RfC or anything about the PROXY command,
-					// so it is unclear, if a response is required.
-					//client.sendResponse(r.SuccessMailCmd)
-				} else {
-					s.log().Error("PROXY parse error", "data", "["+string(input[6:])+"]")
-					client.sendResponse(r.FailSyntaxError)
+			case s.ProxyOn && cmdPROXY.match(cmd):
+				// Client: PROXY TCP4 remote.host.example.com 192.168.1.10 192.168.1.20 5000 6000
+				// PROXY
+				// - TCP4: Protocol version.
+				// - remote.host.example.com: The hostname of the connecting client.
+				// - 192.168.1.10: The client's IP address.
+				// - 192.168.1.20: The proxy's IP address.
+				// - 5000: The client's source port.
+				// - 6000: The proxy's destination port.
+				content := bytes.TrimSpace(cmdPROXY.content(cmd))
+				toks := bytes.Split(content, []byte{' '})
+				s.log().Debug("PROXY", "command", content)
+
+				switch len(toks) {
+				case 5:
+					ip := net.ParseIP(string(toks[1]))
+					conn.RemoteAddr = &net.TCPAddr{IP: ip}
+					conn.sendResponse(greeting)
+					continue
+				case 6:
+					ip := net.ParseIP(string(toks[2]))
+					conn.RemoteAddr = &net.TCPAddr{IP: ip}
+					conn.sendResponse(greeting)
+					continue
+				default:
+					s.log().Error("PROXY parse error, expected 5 or 6 parts", "data", "["+string(content)+"]")
+					conn.sendResponse(response.FailSyntaxError)
+					continue
 				}
 
 			case cmdMAIL.match(cmd):
-				if client.isInTransaction() {
-					client.sendResponse(r.FailNestedMailCmd)
-					break
+				// Client: MAIL FROM:<sender@example.com>
+				// This is the SMTP command that specifies the sender's email address.
+				// Used for the Return-Path header
+				if conn.isInTransaction() {
+					conn.sendResponse(response.FailNestedMailCmd)
+					continue
 				}
-				client.MailFrom, err = client.parsePath(input[10:], client.parser.MailFrom)
+				content := cmdMAIL.content(cmd)
+				conn.MailFrom, err = conn.parsePath(content, conn.parser.MailFrom)
 				if err != nil {
 					s.log().Error("MAIL parse error", "data", "["+string(input[10:])+"]", "err", err)
-					client.sendResponse(err)
-					break
-				} else if client.parser.NullPath {
-					// bounce has empty from address
-					client.MailFrom = mail.Address{}
+					conn.sendResponse(err)
+					continue
 				}
-				client.sendResponse(r.SuccessMailCmd)
+				if conn.parser.NullPath {
+					// bounce has empty from address
+					conn.MailFrom = mail.Address{}
+				}
+				// TODO run Backend hook
+				conn.sendResponse(response.SuccessMailCmd)
+				continue
 
 			case cmdRCPT.match(cmd):
-				if len(client.RcptTo) > rfc5321.LimitRecipients {
-					client.sendResponse(r.ErrorTooManyRecipients)
+				// Client: RCPT TO:<recipient@example.com>
+				// This is the SMTP command that specifies the recipient's email address.
+				if len(conn.RcptTo) > rfc5321.LimitRecipients {
+					conn.sendResponse(response.ErrorTooManyRecipients)
 					break
 				}
-				to, err := client.parsePath(input[8:], client.parser.RcptTo)
+				content := cmdRCPT.content(cmd)
+				to, err := conn.parsePath(content, conn.parser.RcptTo)
 				if err != nil {
 					s.log().Error("RCPT parse error", "data", "["+string(input[8:])+"]", "err", err)
-					client.sendResponse(err.Error())
+					conn.sendResponse(err.Error())
 					break
 				}
-				s.defaultHost(&to)
-				if (to.IP != nil && !s.allowsIp(to.IP)) || (to.IP == nil && !s.allowsHost(to.Host)) {
-					client.sendResponse(r.ErrorRelayDenied, " ", to.Host)
-				} else {
-					client.PushRcpt(to)
-					rcptError := s.backend.ValidateRcpt(client.Envelope)
-					if rcptError != nil {
-						client.PopRcpt()
-						client.sendResponse(r.FailRcptCmd, " ", rcptError.Error())
-					} else {
-						client.sendResponse(r.SuccessRcptCmd)
-					}
-				}
+
+				// TODO run Backend hook
+				conn.RcptTo = append(conn.RcptTo, to)
+				conn.sendResponse(response.SuccessRcptCmd)
+				continue
 
 			case cmdRSET.match(cmd):
-				client.resetTransaction()
-				client.sendResponse(r.SuccessResetCmd)
+				// Client: RSET
+				// The client then decides to abort this transaction and sends the RSET command.
+				conn.resetTransaction()
+				conn.sendResponse(response.SuccessResetCmd)
+				continue
 
 			case cmdVRFY.match(cmd):
-				client.sendResponse(r.SuccessVerifyCmd)
+				// Client: VRFY user@example.com
+				//The SMTP VRFY command is designed to verify the existence of a mailbox or user on a mail serve
+				//Due to these security concerns, most modern SMTP servers have disabled or severely restricted the VRFY command.
+				conn.sendResponse(response.SuccessVerifyCmd)
+				continue
 
 			case cmdNOOP.match(cmd):
-				client.sendResponse(r.SuccessNoopCmd)
+				// Client: NOOP
+				// Its primary purpose is to:
+				// - Check if the server is still alive and responsive.
+				// - Keep the connection alive during periods of inactivity.
+				// - Test the server's response.
+				conn.sendResponse(response.SuccessNoopCmd)
+				continue
 
 			case cmdQUIT.match(cmd):
-				client.sendResponse(r.SuccessQuitCmd)
-				client.kill()
+				// Client: QUIT
+				// The QUIT command is the standard way for an SMTP client to gracefully close a connection to an SMTP server.
+				conn.sendResponse(response.SuccessQuitCmd)
+				conn.kill()
+				return
 
 			case cmdDATA.match(cmd):
-				if len(client.RcptTo) == 0 {
-					client.sendResponse(r.FailNoRecipientsDataCmd)
+				// Client: DATA
+				// The DATA command in SMTP is used to initiate the transfer of the email message content,
+				if len(conn.RcptTo) == 0 {
+					conn.sendResponse(response.FailNoRecipientsDataCmd)
 					break
 				}
-				client.sendResponse(r.SuccessDataCmd)
-				client.state = ClientData
+				conn.sendResponse(response.SuccessDataCmd)
+				conn.state = ConnData
 
-			case sc.TLS.StartTLSOn && cmdSTARTTLS.match(cmd):
+			case cmdSTARTTLS.match(cmd):
+				// Client: STARTTLS
+				// Server: 220 2.0.0 Ready to start TLS
+				// [TLS handshake occurs here]
 
-				client.sendResponse(r.SuccessStartTLSCmd)
-				client.state = ClientStartTLS
+				if s.TLSConfig == nil {
+					conn.sendResponse(response.FailCommandNotImplemented)
+					continue
+				}
+
+				conn.sendResponse(response.SuccessStartTLSCmd)
+				conn.state = ConnStartTLS
+				continue
 			default:
-				client.errors++
-				if client.errors >= MaxUnrecognizedCommands {
-					client.sendResponse(r.FailMaxUnrecognizedCmd)
-					client.kill()
+				conn.errors++
+				if conn.errors >= MaxUnrecognizedCommands {
+					conn.sendResponse(response.FailMaxUnrecognizedCmd)
+					conn.kill()
 				} else {
-					client.sendResponse(r.FailUnrecognizedCmd)
+					conn.sendResponse(response.FailUnrecognizedCmd)
 				}
 			}
 
-		case ClientData:
+		case ConnData:
 
 			// intentionally placed the limit 1MB above so that reading does not return with an error
-			// if the client goes a little over. Anything above will err
-			client.bufin.setLimit(sc.MaxSize + 1024000) // This a hard limit.
+			// if the connection goes a little over. Anything above will err
+			conn.bufin.setLimit(s.MaxSize + 1024000) // This a hard limit.
 
-			n, err := client.Data.ReadFrom(client.smtpReader.DotReader())
-			if n > sc.MaxSize {
-				err = fmt.Errorf("maximum DATA size exceeded (%d)", sc.MaxSize)
+			n, err := conn.Data.ReadFrom(conn.smtpReader.DotReader())
+			if n > s.MaxSize {
+				err = fmt.Errorf("maximum DATA size exceeded (%d)", s.MaxSize)
 			}
 			if err != nil {
-				if err == LineLimitExceeded {
-					client.sendResponse(r.FailReadLimitExceededDataCmd, " ", LineLimitExceeded.Error())
-					client.kill()
-				} else if err == MessageSizeExceeded {
-					client.sendResponse(r.FailMessageSizeExceeded, " ", MessageSizeExceeded.Error())
-					client.kill()
+				s.log().Error("error reading data", "err", err)
+				if errors.Is(err, LineLimitExceeded) {
+					conn.sendResponse(response.FailReadLimitExceededDataCmd, " ", LineLimitExceeded.Error())
+					conn.kill()
+				} else if errors.Is(err, MessageSizeExceeded) {
+					conn.sendResponse(response.FailMessageSizeExceeded, " ", MessageSizeExceeded.Error())
+					conn.kill()
 				} else {
-					client.sendResponse(r.FailReadErrorDataCmd, " ", err.Error())
-					client.kill()
+					conn.sendResponse(response.FailReadErrorDataCmd, " ", err.Error())
+					conn.kill()
 				}
-				s.log().Warn("Error reading data", "ip", client.RemoteIP, "err", err)
-				client.resetTransaction()
-				break
+				s.log().Warn("Error reading data", "ip", conn.RemoteAddr, "err", err)
+				conn.resetTransaction()
+				continue
 			}
 
-			res := s.backend.Process(client.Envelope)
-			if res.Code() < 300 {
-				client.messagesSent++
+			res := s.backend.Process(conn.Envelope)
+			if res.Class() == 2 {
+				conn.messagesSent++
 			}
-			client.sendResponse(res)
-			client.state = ClientCmd
+			conn.sendResponse(res)
+			conn.state = ConnCmd
 			if s.isShuttingDown() {
-				client.state = ClientShutdown
+				conn.state = ConnShutdown
 			}
-			client.resetTransaction()
+			conn.resetTransaction()
+			continue
 
-		case ClientStartTLS:
-			if !client.TLS && sc.TLS.StartTLSOn {
-				tlsConfig, ok := s.tlsConfigStore.Load().(*tls.Config)
-				if !ok {
-					s.log().Error("Failed to load *tls.Config")
-				} else if err := client.upgradeToTLS(tlsConfig); err == nil {
-					advertiseTLS = ""
-					client.resetTransaction()
-				} else {
-					s.log().Warn("Failed TLS handshake", "ip", client.RemoteIP, "err", err)
-					// Don't disconnect, let the client decide if it wants to continue
-				}
+		case ConnStartTLS:
+			if conn.TLS { // already in tls mode...
+				s.log().Warn("Failed TLS start, tls is alreade active", "ip", conn.RemoteAddr)
+				conn.state = ConnCmd
+				continue
 			}
-			// change to command state
-			client.state = ClientCmd
-		case ClientShutdown:
+
+			if s.TLSConfig == nil { // no tls config available
+				s.log().Warn("Failed TLS start, no tls config", "ip", conn.RemoteAddr)
+				conn.state = ConnCmd
+				continue
+			}
+
+			err := conn.upgradeTLS(s.TLSConfig)
+			if err != nil {
+				s.log().Warn("Failed TLS handshake", "ip", conn.RemoteAddr, "err", err)
+				conn.state = ConnCmd
+				continue
+			}
+			advertiseTLS = ""
+			conn.resetTransaction()
+			conn.state = ConnCmd
+			continue
+
+		case ConnShutdown:
 			// shutdown state
-			client.sendResponse(r.ErrorShutdown)
-			client.kill()
+			conn.sendResponse(response.ErrorShutdown)
+			conn.kill()
 		}
 
-		if client.bufErr != nil {
-			s.log().Debug("client could not buffer a response", "err", client.bufErr)
+		if conn.bufErr != nil {
+			s.log().Debug("connection could not buffer a response", "err", conn.bufErr)
 			return
 		}
 		// flush the response buffer
-		if client.bufout.Buffered() > 0 {
+		if conn.bufout.Buffered() > 0 {
 
-			s.log().Debug(fmt.Sprintf("Writing response to client: %s", client.response.String()))
+			s.log().Debug(fmt.Sprintf("Writing response to connection: %s", conn.response.String()))
 
-			err := s.flushResponse(client)
+			err := s.flushResponse(conn)
 			if err != nil {
 				s.log().Debug("error writing response", "err", err)
 				return
@@ -540,40 +601,9 @@ func (s *server) handleClient(client *client) {
 	}
 }
 
-func (s *server) log() *slog.Logger {
-
+func (s *Server) log() *slog.Logger {
 	if s.logger == nil {
-		return slog.New(slog.NewTextHandler(io.Discard, nil))
+		return noopLogger()
 	}
-
 	return s.logger
-}
-
-// defaultHost ensures that the host attribute is set, if addressed to Postmaster
-func (s *server) defaultHost(a *mail.Address) {
-	if a.Host == "" && a.IsPostmaster() {
-		sc := s.serverConfig
-		a.Host = sc.Hostname
-		if !s.allowsHost(a.Host) {
-			s.log().Warn("the hostname is not present in AllowedHosts config setting", "hostname", sc.Hostname)
-		}
-	}
-}
-
-// Creates and returns a new ready-to-run Server from a ServerConfig configuration
-func newServer(sc *ServerConfig, backend backends.Backend, logger *slog.Logger) (*server, error) {
-	server := &server{
-		clientPool:      NewPool(sc.MaxClients),
-		closedListener:  make(chan bool, 1),
-		listenInterface: sc.ListenInterface,
-		state:           ServerStateNew,
-		envelopePool:    mail.NewPool(sc.MaxClients),
-	}
-	server.logger = logger
-	server.backend = backend
-
-	server.setConfig(sc)
-	server.setTimeout(sc.Timeout)
-
-	return server, nil
 }

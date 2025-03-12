@@ -18,57 +18,60 @@ import (
 	"github.com/phires/go-guerrilla/response"
 )
 
-// ClientState indicates which part of the SMTP transaction a given client is in.
+// ClientState indicates which part of the SMTP transaction a given connection is in.
 type ClientState int
 
 const (
-	// The client has connected, and is awaiting our first response
-	ClientGreeting = iota
-	// We have responded to the client's connection and are awaiting a command
-	ClientCmd
-	// We have received the sender and recipient information
-	ClientData
-	// We have agreed with the client to secure the connection over TLS
-	ClientStartTLS
-	// Server will shutdown, client to shutdown on next command turn
-	ClientShutdown
+	// ConnGreeting The connection has connected, and is awaiting our first response
+	ConnGreeting = iota
+	// ConnCmd We have responded to the connection's connection and are awaiting a command
+	ConnCmd
+	// ConnData We have received the sender and recipient information
+	ConnData
+	// ConnStartTLS We have agreed with the connection to secure the connection over TLS
+	ConnStartTLS
+	// Server will shut down, connection to shutdown on next command turn
+	ConnShutdown
 )
 
-type client struct {
+type connection struct {
 	*mail.Envelope
-	ID          uint64
+	ID uint64
+
 	ConnectedAt time.Time
 	KilledAt    time.Time
-	// Number of errors encountered during session with this client
+
+	// Number of errors encountered during session with this connection
 	errors       int
 	state        ClientState
 	messagesSent int
-	// Response to be written to the client (for debugging)
-	response   bytes.Buffer
-	bufErr     error
-	conn       net.Conn
+	// Response to be written to the connection (for debugging)
+	response bytes.Buffer
+	bufErr   error
+
 	bufin      *smtpBufferedReader
 	bufout     *bufio.Writer
 	smtpReader *textproto.Reader
 	ar         *adjustableLimitedReader
 	// guards access to conn
 	connGuard sync.Mutex
-	log       *slog.Logger
-	parser    rfc5321.Parser
+	conn      net.Conn
+
+	log    *slog.Logger
+	parser rfc5321.Parser
 }
 
-// NewClient allocates a new client.
-func NewClient(conn net.Conn, clientID uint64, logger *slog.Logger, envelope *mail.Pool) *client {
-	c := &client{
+// newConnection allocates a new connection.
+func newConnection(conn net.Conn, clientID uint64, logger *slog.Logger) *connection {
+	c := &connection{
 		conn: conn,
-		// Envelope will be borrowed from the envelope pool
-		// the envelope could be 'detached' from the client later when processing
-		Envelope:    envelope.Borrow(getRemoteAddr(conn), clientID),
+
+		Envelope:    mail.NewEnvelope(conn.RemoteAddr(), clientID),
 		ConnectedAt: time.Now(),
 		bufin:       newSMTPBufferedReader(conn),
 		bufout:      bufio.NewWriter(conn),
-		ID:          clientID,
-		log:         logger,
+
+		log: logger,
 	}
 
 	// used for reading the DATA state
@@ -78,7 +81,7 @@ func NewClient(conn net.Conn, clientID uint64, logger *slog.Logger, envelope *ma
 
 // sendResponse adds a response to be written on the next turn
 // the response gets buffered
-func (c *client) sendResponse(r ...interface{}) {
+func (c *connection) sendResponse(r ...interface{}) {
 	c.bufout.Reset(c.conn)
 	if c.log.Enabled(context.Background(), slog.LevelDebug) {
 		// an additional buffer so that we can log the response in debug mode only
@@ -118,14 +121,14 @@ func (c *client) sendResponse(r ...interface{}) {
 // -HELO/EHLO/REST command
 // -End of DATA command
 // TLS handshake
-func (c *client) resetTransaction() {
-	c.Envelope.ResetTransaction()
+func (c *connection) resetTransaction() {
+	c.Envelope = mail.NewEnvelope(c.RemoteAddr, c.ClientId)
 }
 
 // isInTransaction returns true if the connection is inside a transaction.
-// A transaction starts after a MAIL command gets issued by the client.
+// A transaction starts after a MAIL command gets issued by the connection.
 // Call resetTransaction to end the transaction
-func (c *client) isInTransaction() bool {
+func (c *connection) isInTransaction() bool {
 	if len(c.MailFrom.User) == 0 && !c.MailFrom.NullPath {
 		return false
 	}
@@ -133,17 +136,17 @@ func (c *client) isInTransaction() bool {
 }
 
 // kill flags the connection to close on the next turn
-func (c *client) kill() {
+func (c *connection) kill() {
 	c.KilledAt = time.Now()
 }
 
-// isAlive returns true if the client is to close on the next turn
-func (c *client) isAlive() bool {
+// isAlive returns true if the connection is to close on the next turn
+func (c *connection) isAlive() bool {
 	return c.KilledAt.IsZero()
 }
 
 // setTimeout adjust the timeout on the connection, goroutine safe
-func (c *client) setTimeout(t time.Duration) (err error) {
+func (c *connection) setTimeout(t time.Duration) (err error) {
 	defer c.connGuard.Unlock()
 	c.connGuard.Lock()
 	if c.conn != nil {
@@ -152,38 +155,17 @@ func (c *client) setTimeout(t time.Duration) (err error) {
 	return
 }
 
-// closeConn closes a client connection, , goroutine safe
-func (c *client) closeConn() {
+// closeConn closes a connection connection, , goroutine safe
+func (c *connection) closeConn() {
 	defer c.connGuard.Unlock()
 	c.connGuard.Lock()
 	_ = c.conn.Close()
 	c.conn = nil
 }
 
-// init is called after the client is borrowed from the pool, to get it ready for the connection
-func (c *client) init(conn net.Conn, clientID uint64, ep *mail.Pool) {
-	c.conn = conn
-	// reset our reader & writer
-	c.bufout.Reset(conn)
-	c.bufin.Reset(conn)
-	// reset session data
-	c.state = 0
-	c.KilledAt = time.Time{}
-	c.ConnectedAt = time.Now()
-	c.ID = clientID
-	c.errors = 0
-	// borrow an envelope from the envelope pool
-	c.Envelope = ep.Borrow(getRemoteAddr(conn), clientID)
-}
-
-// getID returns the client's unique ID
-func (c *client) getID() uint64 {
-	return c.ID
-}
-
-// UpgradeToTLS upgrades a client connection to TLS
-func (c *client) upgradeToTLS(tlsConfig *tls.Config) error {
-	// wrap c.conn in a new TLS server side connection
+// UpgradeToTLS upgrades a connection connection to TLS
+func (c *connection) upgradeTLS(tlsConfig *tls.Config) error {
+	// wrap c.conn in a new TLS Server side connection
 	tlsConn := tls.Server(c.conn, tlsConfig)
 	// Call handshake here to get any handshake error before reading starts
 	err := tlsConn.Handshake()
@@ -198,32 +180,23 @@ func (c *client) upgradeToTLS(tlsConfig *tls.Config) error {
 	return err
 }
 
-func getRemoteAddr(conn net.Conn) string {
-	if addr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
-		// we just want the IP (not the port)
-		return addr.IP.String()
-	} else {
-		return conn.RemoteAddr().Network()
-	}
-}
-
 type pathParser func([]byte) error
 
-func (c *client) parsePath(in []byte, p pathParser) (mail.Address, error) {
+func (c *connection) parsePath(in []byte, p pathParser) (mail.Address, error) {
 	address := mail.Address{}
 	var err error
 	if len(in) > rfc5321.LimitPath {
-		return address, errors.New(response.Canned.FailPathTooLong.String())
+		return address, errors.New(response.FailPathTooLong.String())
 	}
 	if err = p(in); err != nil {
-		return address, errors.New(response.Canned.FailInvalidAddress.String())
+		return address, errors.New(response.FailInvalidAddress.String())
 	} else if c.parser.NullPath {
 		// bounce has empty from address
 		address = mail.Address{}
 	} else if len(c.parser.LocalPart) > rfc5321.LimitLocalPart {
-		err = errors.New(response.Canned.FailLocalPartTooLong.String())
+		err = errors.New(response.FailLocalPartTooLong.String())
 	} else if len(c.parser.Domain) > rfc5321.LimitDomain {
-		err = errors.New(response.Canned.FailDomainTooLong.String())
+		err = errors.New(response.FailDomainTooLong.String())
 	} else {
 		address = mail.Address{
 			User:       c.parser.LocalPart,
@@ -235,9 +208,5 @@ func (c *client) parsePath(in []byte, p pathParser) (mail.Address, error) {
 			IP:         c.parser.IP,
 		}
 	}
-	return address, err
-}
-
-func (s *server) rcptTo() (address mail.Address, err error) {
 	return address, err
 }

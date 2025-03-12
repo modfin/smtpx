@@ -36,7 +36,7 @@ func DecorateDeliveryHeader(primaryHost string) Decorator {
 				}
 				var addHead string
 				addHead += "Delivered-To: " + to + "\n"
-				addHead += "Received: from " + e.RemoteIP + " ([" + e.RemoteIP + "])\n"
+				addHead += "Received: from " + e.RemoteAddr + " ([" + e.RemoteAddr + "])\n"
 				if len(e.RcptTo) > 0 {
 					addHead += "	by " + e.RcptTo[0].Host + " with " + protocol + " id " + hash + "@" + e.RcptTo[0].Host + ";\n"
 				}
