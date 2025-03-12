@@ -1,7 +1,8 @@
 package guerrilla
 
 import (
-	"github.com/phires/go-guerrilla/mail"
+	"github.com/phires/go-guerrilla/envelope"
+	"net/mail"
 )
 
 // Backend is process received mail. Depending on the implementation, they can store mail in the database,
@@ -9,36 +10,37 @@ import (
 // Must return an SMTP message (i.e. "250 OK") and a boolean indicating
 // whether the message was processed successfully.
 type Backend interface {
+
+	// Mail is a hook from smtp server to Backend if from is allowed.
+	Mail(e *envelope.Envelope, from *mail.Address) error
+
+	// Rcpt is hook from smtp server to Backend if to is allowed.
+	Rcpt(e *envelope.Envelope, to *mail.Address) error
+
 	// Process processes then saves the mail envelope
-	Process(*mail.Envelope) Result
-
-	// Mail is a hook from smtp server to backend if from is allowed.
-	Mail(from mail.Address) error
-
-	// Rcpt is hook from smtp server to backend if to is allowed.
-	Rcpt(to mail.Address) error
+	Process(*envelope.Envelope) Result
 }
 
-func BackendFunc(processor func(*mail.Envelope) Result) Backend {
+func BackendFunc(processor func(*envelope.Envelope) Result) Backend {
 	return ProcessFunc(processor)
 }
 
-// ProcessWith Signature of Processor
-type ProcessFunc func(*mail.Envelope) Result
+// ProcessFunc is a function that processes then saves the mail envelope
+type ProcessFunc func(*envelope.Envelope) Result
 
 // Process Make ProcessWith will satisfy the Processor interface
-func (f ProcessFunc) Process(e *mail.Envelope) Result {
+func (f ProcessFunc) Process(e *envelope.Envelope) Result {
 	return f(e)
 }
 
-func (f ProcessFunc) Mail(from mail.Address) error {
+func (f ProcessFunc) Mail(e *envelope.Envelope, from *mail.Address) error {
 	return nil
 }
 
-func (f ProcessFunc) Rcpt(to mail.Address) error {
+func (f ProcessFunc) Rcpt(e *envelope.Envelope, to *mail.Address) error {
 	return nil
 }
 
-var NoopBackend Backend = BackendFunc(func(e *mail.Envelope) Result {
+var NoopBackend Backend = BackendFunc(func(e *envelope.Envelope) Result {
 	return NewResult(250, "OK")
 })

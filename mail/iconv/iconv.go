@@ -2,9 +2,9 @@ package iconv
 
 import (
 	"fmt"
+	"github.com/phires/go-guerrilla/envelope"
 	"io"
 
-	"github.com/phires/go-guerrilla/mail"
 	ico "gopkg.in/iconv.v1"
 )
 
@@ -14,7 +14,7 @@ import (
 // when importing, place an underscore _ in front to import for side-effects
 
 func init() {
-	mail.Dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
+	envelope.Dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
 		if cd, err := ico.Open("UTF-8", charset); err == nil {
 			r := ico.NewReader(cd, input, 32)
 			return r, nil

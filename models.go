@@ -102,3 +102,7 @@ func (r result) Class() int {
 func NewResult(code int, str string) Result {
 	return result{code: code, str: str}
 }
+
+func NewResultFromError(err error) Result {
+	return result{code: 500, str: err.Error()}
+}

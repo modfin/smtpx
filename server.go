@@ -1,7 +1,6 @@
 package guerrilla
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -9,12 +8,13 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/mail"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/phires/go-guerrilla/mail"
 	"github.com/phires/go-guerrilla/mail/rfc5321"
 	"github.com/phires/go-guerrilla/response"
 )
@@ -45,6 +45,10 @@ const defaultMaxSize = 10_485_760 // int64(10 << 20) // 10 Megabytes
 
 // Server listens for SMTP clients on the port specified in its config
 type Server struct {
+	Logger  *slog.Logger
+	Backend Backend
+
+	// TLSConfig will be used when TLS is enabled
 	TLSConfig *tls.Config
 	// AlwaysOn run this Server as a pure TLS Server, i.e. SMTPS
 	TLSAlwaysOn bool
@@ -78,14 +82,11 @@ type Server struct {
 	countConnections atomic.Int64
 
 	state int
-
-	backend Backend
-	logger  *slog.Logger
 }
 
 func (c *Server) setDefaults() error {
-	if c.logger == nil {
-		c.logger = noopLogger()
+	if c.Logger == nil {
+		c.Logger = noopLogger()
 	}
 
 	if c.Addr == "" {
@@ -108,6 +109,10 @@ func (c *Server) setDefaults() error {
 		c.MaxSize = defaultMaxSize // 10 Mebibytes
 	}
 
+	if c.closedListener == nil {
+		c.closedListener = make(chan struct{})
+	}
+
 	return nil
 }
 
@@ -117,38 +122,42 @@ type allowedHosts struct {
 	sync.Mutex                 // guard access to the map
 }
 
-type command []byte
+type command string
 
 var (
-	cmdHELO     command = []byte("HELO")
-	cmdEHLO     command = []byte("EHLO")
-	cmdHELP     command = []byte("HELP")
-	cmdXCLIENT  command = []byte("XCLIENT ")
-	cmdMAIL     command = []byte("MAIL FROM:")
-	cmdRCPT     command = []byte("RCPT TO:")
-	cmdRSET     command = []byte("RSET")
-	cmdVRFY     command = []byte("VRFY")
-	cmdNOOP     command = []byte("NOOP")
-	cmdQUIT     command = []byte("QUIT")
-	cmdDATA     command = []byte("DATA")
-	cmdSTARTTLS command = []byte("STARTTLS")
-	cmdPROXY    command = []byte("PROXY ")
+	cmdHELO     command = "HELO "
+	cmdEHLO     command = "EHLO"
+	cmdHELP     command = "HELP"
+	cmdXCLIENT  command = "XCLIENT "
+	cmdMAIL     command = "MAIL FROM:"
+	cmdRCPT     command = "RCPT TO:"
+	cmdRSET     command = "RSET"
+	cmdVRFY     command = "VRFY"
+	cmdNOOP     command = "NOOP"
+	cmdQUIT     command = "QUIT"
+	cmdDATA     command = "DATA"
+	cmdSTARTTLS command = "STARTTLS"
+	cmdPROXY    command = "PROXY "
 )
 
-func (c command) match(in []byte) bool {
-	return bytes.HasPrefix(in, c)
+func (c command) match(cmd string) bool {
+	return strings.HasPrefix(strings.ToUpper(cmd), string(c))
 }
 
-func (c command) content(in []byte) []byte {
-	return bytes.TrimPrefix(in, c)
+func (c command) content(in string) string {
+	return in[len(c):] // since we accept mixed cases here...
 }
 
 // ListenAndServe begin accepting SMTP clients. Will block unless there is an error or Server.Shutdown() is called
 func (s *Server) ListenAndServe() error {
+	err := s.setDefaults()
+	if err != nil {
+		return err
+	}
+
 	log := s.log().With("inf", s.Addr)
 
 	var clientID uint64
-	var err error
 
 	s.listener, err = net.Listen("tcp", s.Addr)
 	if err != nil {
@@ -156,7 +165,7 @@ func (s *Server) ListenAndServe() error {
 		return fmt.Errorf("cannot listen on %s, err %w ", s.Addr, err)
 	}
 
-	log.Info("Listening on TCP", "interface", s.Addr)
+	log.Info("Listening on TCP")
 	s.state = ServerStateRunning
 
 	for {
@@ -164,12 +173,15 @@ func (s *Server) ListenAndServe() error {
 		conn, err := s.listener.Accept()
 		clientID++
 		if err != nil {
-			// TODO error my be temporary?
-			log.With("interface", s.Addr).Info("Server has stopped accepting new clients")
+			log.Info("Server has stopped accepting new clients", "connections", s.countConnections.Load())
 			s.state = ServerStateStopped
+			// wait for all connections to finish, this might be dangerous and a deadline should be set
+			s.wgConnections.Wait() // wait for all connections to finish
 			close(s.closedListener)
 			return nil
 		}
+
+		log.Debug("Accepted new connection", "ip", conn.RemoteAddr())
 
 		s.wgConnections.Add(1)
 		s.countConnections.Add(1)
@@ -177,8 +189,8 @@ func (s *Server) ListenAndServe() error {
 			defer s.wgConnections.Done()
 			defer s.countConnections.Add(-1)
 			defer conn.Close()
+			s.handleConn(newConnection(conn, clientID, s.Logger))
 
-			s.handleConn(newConnection(conn, clientID, s.logger))
 		}(conn, clientID)
 	}
 }
@@ -202,32 +214,6 @@ func (s *Server) GetActiveClientsCount() int {
 	return int(s.countConnections.Load())
 }
 
-const commandSuffix = "\r\n"
-
-// Reads from the connection until a \n terminator is encountered,
-// or until a timeout occurs.
-func (s *Server) readCommand(conn *connection) ([]byte, error) {
-	//var input string
-	var err error
-	var bs []byte
-	// In command state, stop reading at line breaks
-	bs, err = conn.bufin.ReadSlice('\n')
-	if err != nil {
-		return bs, err
-	} else if bytes.HasSuffix(bs, []byte(commandSuffix)) {
-		return bs[:len(bs)-2], err
-	}
-	return bs[:len(bs)-1], err
-}
-
-// flushResponse a response to the connection. Flushes the connection.bufout buffer to the connection
-func (s *Server) flushResponse(conn *connection) error {
-	if err := conn.setTimeout(time.Duration(s.Timeout) * time.Second); err != nil {
-		return err
-	}
-	return conn.bufout.Flush()
-}
-
 func (s *Server) isShuttingDown() bool {
 	select {
 	case <-s.closedListener:
@@ -240,9 +226,10 @@ func (s *Server) isShuttingDown() bool {
 // Handles an entire connection SMTP exchange
 func (s *Server) handleConn(conn *connection) {
 	defer conn.closeConn()
-	log := s.log().With("id", conn.ClientId, "ip", conn.RemoteAddr)
+	log := s.log().With("id", conn.ClientId(), "ip", conn.RemoteAddr)
 
 	log.Info("Handle connection")
+	defer log.Info("Close connection")
 
 	// Initial greeting
 	greeting := fmt.Sprintf("220 %s SMTP %s(%s) #%d  %s",
@@ -276,26 +263,9 @@ func (s *Server) handleConn(conn *connection) {
 		advertiseTLS = ""
 	}
 
-	flush := func() error {
-		// flush the response buffer
-		if conn.bufout != nil && conn.bufout.Buffered() > 0 {
-			log.Debug(fmt.Sprintf("Writing response to connection: %s", conn.response.String()))
-			err := s.flushResponse(conn)
-			if err != nil {
-				return fmt.Errorf("could not flush buffer to client, %w", err)
-			}
-		}
-		return nil
-	}
-	defer flush()
-
 	for conn.isAlive() {
 		if conn.bufErr != nil {
 			log.Debug("connection could not buffer a response", "err", conn.bufErr)
-			return
-		}
-		if err := flush(); err != nil {
-			log.Debug("error flushing response", "err", err)
 			return
 		}
 
@@ -303,11 +273,12 @@ func (s *Server) handleConn(conn *connection) {
 		case ConnGreeting:
 			conn.sendResponse(greeting)
 			conn.state = ConnCmd
+			continue
 
 		case ConnCmd:
-			conn.bufin.setLimit(CommandLineMaxLength)
-			input, err := s.readCommand(conn)
-			log.Debug("Client sent:", "command", input)
+			// TODO set readlimit ... // TODO avoid DoS
+			cmd, err := conn.readCommand()
+			log.Debug("Client: " + cmd)
 			if err == io.EOF {
 				log.Warn("Client closed the connection", "err", err)
 				return
@@ -331,25 +302,19 @@ func (s *Server) handleConn(conn *connection) {
 				continue
 			}
 
-			cmdLen := len(input)
-			if cmdLen > CommandVerbMaxLength {
-				cmdLen = CommandVerbMaxLength
-			}
-			cmd := bytes.ToUpper(input[:cmdLen])
 			switch {
 			case cmdHELO.match(cmd):
 				// Client: HELO example.com
 				// The client sends the HELO command, followed by its own fully qualified domain name (FQDN) or IP address.
 				// HELO is the older "Hello" command, used in basic SMTP sessions
 				//  (as opposed to the extended ESMTP sessions initiated by EHLO).
+				//
+				// helo = "HELO" SP Domain CRLF
+				// HELO example.com\r\n
+				// HELO 192.168.1.10\r\n
 				content := cmdHELO.content(cmd)
-				if h, err := conn.parser.Helo(content); err == nil {
-					conn.Helo = h
-				} else {
-					log.Warn("invalid helo", "helo", h, "connection", conn.ID)
-					conn.sendResponse(response.FailSyntaxError)
-					break
-				}
+				conn.Helo = strings.TrimSpace(string(content)) // TODO parse domain or IP address
+
 				conn.resetTransaction()
 				conn.sendResponse(helo)
 				continue
@@ -358,14 +323,17 @@ func (s *Server) handleConn(conn *connection) {
 				// Client: EHLO example.com
 				// The client sends the EHLO command, followed by its own fully qualified domain name (FQDN) or IP address.
 				// Client is saying "Hello, I am example.com, and I would like to establish an ESMTP connection."
+				//
+				// ehlo = "EHLO" SP ( Domain / address-literal ) CRLF
+				//  - SP is a single space
+				//  - Domain: A fully qualified domain name (FQDN).
+				//  - address-literal: An IP address enclosed in square brackets
+				// EHLO mail.example.com\r\n
+				// EHLO [192.168.1.10]\r\n
+				// EHLO [IPv6:2001:0db8:85a3:0000:0000:8a2e:0370:7334]\r\n
 				content := cmdHELO.content(cmd)
-				if h, _, err := conn.parser.Ehlo(content); err == nil {
-					conn.Helo = h
-				} else {
-					log.Warn("invalid ehlo", "ehlo", h, "connection", conn.ID)
-					conn.sendResponse(response.FailSyntaxError)
-					break
-				}
+				conn.Helo = strings.TrimSpace(string(content))
+
 				conn.ESMTP = true
 				conn.resetTransaction()
 				conn.sendResponse(ehlo,
@@ -388,19 +356,19 @@ func (s *Server) handleConn(conn *connection) {
 				// the server before the MAIL FROM command. This is particularly useful in situations where a proxy or
 				// load balancer is involved.
 				content := cmdXCLIENT.content(cmd)
-				toks := bytes.Split(content, []byte{' '})
+				toks := strings.Fields(content)
 				for _, tok := range toks {
-					key, val, found := bytes.Cut(tok, []byte{'='})
+					key, val, found := strings.Cut(tok, "=")
 					if found {
-						if bytes.Equal(val, []byte("[UNAVAILABLE]")) {
+						if val == "[UNAVAILABLE]" {
 							continue
 						}
-						if bytes.Equal(key, []byte("ADDR")) {
+						if key == "ADDR" {
 							ip := net.ParseIP(string(val))
 							conn.RemoteAddr = &net.TCPAddr{IP: ip}
 						}
-						if bytes.Equal(key, []byte("HELO")) {
-							conn.Helo = string(val)
+						if key == "HELO" {
+							conn.Helo = val
 						}
 					}
 				}
@@ -416,23 +384,23 @@ func (s *Server) handleConn(conn *connection) {
 				// - 192.168.1.20: The proxy's IP address.
 				// - 5000: The client's source port.
 				// - 6000: The proxy's destination port.
-				content := bytes.TrimSpace(cmdPROXY.content(cmd))
-				toks := bytes.Split(content, []byte{' '})
+				content := strings.TrimSpace(cmdPROXY.content(cmd))
+				toks := strings.Fields(content)
 				log.Debug("PROXY", "command", content)
 
 				switch len(toks) {
 				case 5:
-					ip := net.ParseIP(string(toks[1]))
+					ip := net.ParseIP(toks[1])
 					conn.RemoteAddr = &net.TCPAddr{IP: ip}
 					conn.sendResponse(greeting)
 					continue
 				case 6:
-					ip := net.ParseIP(string(toks[2]))
+					ip := net.ParseIP(toks[2])
 					conn.RemoteAddr = &net.TCPAddr{IP: ip}
 					conn.sendResponse(greeting)
 					continue
 				default:
-					log.Error("PROXY parse error, expected 5 or 6 parts", "data", "["+string(content)+"]")
+					log.Error("PROXY parse error, expected 5 or 6 parts", "data", content)
 					conn.sendResponse(response.FailSyntaxError)
 					continue
 				}
@@ -446,17 +414,22 @@ func (s *Server) handleConn(conn *connection) {
 					continue
 				}
 				content := cmdMAIL.content(cmd)
-				conn.MailFrom, err = conn.parsePath(content, conn.parser.MailFrom)
+				conn.MailFrom, err = mail.ParseAddress(string(content))
 				if err != nil {
-					log.Error("MAIL parse error", "data", "["+string(input[10:])+"]", "err", err)
+					log.Error("MAIL parse error", "data", "["+string(content)+"]", "err", err)
 					conn.sendResponse(err)
 					continue
 				}
-				if conn.parser.NullPath {
-					// bounce has empty from address
-					conn.MailFrom = mail.Address{}
+
+				// Hook to Backend to check if it alloed
+				err = s.Backend.Mail(conn.Envelope, conn.MailFrom)
+				if err != nil { // indicates that we should abort
+					log.Error("MAIL hook error", "data", "["+string(content)+"]", "err", err)
+					conn.sendResponse(response.RejectedSenderMailCmd)
+					conn.kill()
+					continue
 				}
-				// TODO run Backend hook
+
 				conn.sendResponse(response.SuccessMailCmd)
 				continue
 
@@ -468,14 +441,22 @@ func (s *Server) handleConn(conn *connection) {
 					break
 				}
 				content := cmdRCPT.content(cmd)
-				to, err := conn.parsePath(content, conn.parser.RcptTo)
+				to, err := mail.ParseAddress(string(content))
 				if err != nil {
-					log.Error("RCPT parse error", "data", "["+string(input[8:])+"]", "err", err)
-					conn.sendResponse(err.Error())
+					log.Error("RCPT parse error", "data", "["+string(content)+"]", "err", err)
+					conn.sendResponse(response.FailSyntaxError)
 					break
 				}
 
-				// TODO run Backend hook
+				// Hook to Backend to check if ut i is allowed
+				err = s.Backend.Rcpt(conn.Envelope, to)
+				if err != nil { // indicates that we should abort
+					log.Error("MAIL hook error", "data", "["+string(content)+"]", "err", err)
+					conn.sendResponse(response.RejectedRcptCmd)
+					conn.kill()
+					continue
+				}
+
 				conn.RcptTo = append(conn.RcptTo, to)
 				conn.sendResponse(response.SuccessRcptCmd)
 				continue
@@ -547,9 +528,10 @@ func (s *Server) handleConn(conn *connection) {
 
 			// intentionally placed the limit 1MB above so that reading does not return with an error
 			// if the connection goes a little over. Anything above will err
-			conn.bufin.setLimit(s.MaxSize + 1024000) // This a hard limit.
+			// TODO make a limit to readers...
+			//conn.bufin.setLimit(s.MaxSize + 1024000) // This a hard limit.
 
-			n, err := conn.Data.ReadFrom(conn.smtpReader.DotReader())
+			n, err := conn.Data.ReadFrom(conn.in.DotReader())
 			if n > s.MaxSize {
 				err = fmt.Errorf("maximum DATA size exceeded (%d)", s.MaxSize)
 			}
@@ -570,7 +552,7 @@ func (s *Server) handleConn(conn *connection) {
 				continue
 			}
 
-			res := s.backend.Process(conn.Envelope)
+			res := s.Backend.Process(conn.Envelope)
 			if res.Class() == 2 {
 				conn.messagesSent++
 			}
@@ -617,8 +599,8 @@ func (s *Server) handleConn(conn *connection) {
 }
 
 func (s *Server) log() *slog.Logger {
-	if s.logger == nil {
+	if s.Logger == nil {
 		return noopLogger()
 	}
-	return s.logger
+	return s.Logger
 }

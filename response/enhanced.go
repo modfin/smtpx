@@ -126,6 +126,19 @@ var FailNestedMailCmd = &Response{
 	Comment:      "Error: nested MAIL command",
 }
 
+var RejectedSenderMailCmd = &Response{
+	EnhancedCode: InvalidCommandArguments,
+	BasicCode:    553,
+	Class:        ClassPermanentFailure,
+	Comment:      "Sender address rejected: Access denied",
+}
+var RejectedRcptCmd = &Response{
+	EnhancedCode: InvalidCommandArguments,
+	BasicCode:    553,
+	Class:        ClassPermanentFailure,
+	Comment:      "Recipient address rejected: Access denied",
+}
+
 var SuccessMailCmd = &Response{
 	EnhancedCode: OtherAddressStatus,
 	Class:        ClassSuccess,
@@ -310,6 +323,13 @@ var FailBackendTimeout = &Response{
 }
 
 var FailRcptCmd = &Response{
+	EnhancedCode: BadDestinationMailboxAddress,
+	BasicCode:    550,
+	Class:        ClassPermanentFailure,
+	Comment:      "User unknown in local recipient table",
+}
+
+var FailMailCmd = &Response{
 	EnhancedCode: BadDestinationMailboxAddress,
 	BasicCode:    550,
 	Class:        ClassPermanentFailure,

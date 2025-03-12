@@ -5,15 +5,15 @@
 package encoding
 
 import (
+	"github.com/phires/go-guerrilla/envelope"
 	"io"
 
-	"github.com/phires/go-guerrilla/mail"
 	cs "golang.org/x/net/html/charset"
 )
 
 func init() {
 
-	mail.Dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
+	envelope.Dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
 		return cs.NewReaderLabel(charset, input)
 	}
 

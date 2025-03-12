@@ -1,7 +1,7 @@
 package backends
 
 import (
-	"github.com/phires/go-guerrilla/mail"
+	"github.com/phires/go-guerrilla/envelope"
 )
 
 type SelectTask int
@@ -25,14 +25,14 @@ var BackendResultOK = NewResult("200 OK")
 
 // Processor Our processor is defined as something that processes the envelope and returns a result and error
 type Processor interface {
-	Process(*mail.Envelope, SelectTask) (Result, error)
+	Process(*envelope.Envelope, SelectTask) (Result, error)
 }
 
 // ProcessWith Signature of Processor
-type ProcessWith func(*mail.Envelope, SelectTask) (Result, error)
+type ProcessWith func(*envelope.Envelope, SelectTask) (Result, error)
 
 // Process Make ProcessWith will satisfy the Processor interface
-func (f ProcessWith) Process(e *mail.Envelope, task SelectTask) (Result, error) {
+func (f ProcessWith) Process(e *envelope.Envelope, task SelectTask) (Result, error) {
 	// delegate to the anonymous function
 	return f(e, task)
 }
@@ -43,7 +43,7 @@ type DefaultProcessor struct{}
 
 // Process do nothing except return the result
 // (this is the last call in the decorator stack, if it got here, then all is good)
-func (w DefaultProcessor) Process(e *mail.Envelope, task SelectTask) (Result, error) {
+func (w DefaultProcessor) Process(e *envelope.Envelope, task SelectTask) (Result, error) {
 	return BackendResultOK, nil
 }
 

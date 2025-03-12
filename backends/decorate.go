@@ -1,7 +1,7 @@
 package backends
 
 import (
-	"github.com/phires/go-guerrilla/mail"
+	"github.com/phires/go-guerrilla/envelope"
 	"strings"
 	"time"
 )
@@ -20,7 +20,7 @@ func Decorate(c Processor, ds ...Decorator) Processor {
 
 func DecorateDeliveryHeader(primaryHost string) Decorator {
 	return func(p Processor) Processor {
-		return ProcessWith(func(e *mail.Envelope, task SelectTask) (Result, error) {
+		return ProcessWith(func(e *envelope.Envelope, task SelectTask) (Result, error) {
 			if task == TaskSaveMail {
 				to := strings.TrimSpace(e.RcptTo[0].User) + "@" + primaryHost
 				hash := "unknown"
@@ -55,7 +55,7 @@ func DecorateDeliveryHeader(primaryHost string) Decorator {
 
 func DecorateHeadersParser() Decorator {
 	return func(p Processor) Processor {
-		return ProcessWith(func(e *mail.Envelope, task SelectTask) (Result, error) {
+		return ProcessWith(func(e *envelope.Envelope, task SelectTask) (Result, error) {
 			if task == TaskSaveMail {
 				if err := e.ParseHeaders(); err != nil {
 					Log().WithError(err).Error("parse headers error")

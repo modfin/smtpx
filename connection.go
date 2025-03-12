@@ -2,20 +2,17 @@ package guerrilla
 
 import (
 	"bufio"
-	"bytes"
-	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
+	"github.com/phires/go-guerrilla/envelope"
+	"io"
 	"log/slog"
 	"net"
 	"net/textproto"
 	"sync"
 	"time"
 
-	"github.com/phires/go-guerrilla/mail"
 	"github.com/phires/go-guerrilla/mail/rfc5321"
-	"github.com/phires/go-guerrilla/response"
 )
 
 // ClientState indicates which part of the SMTP transaction a given connection is in.
@@ -35,7 +32,8 @@ const (
 )
 
 type connection struct {
-	*mail.Envelope
+	*envelope.Envelope
+
 	ID uint64
 
 	ConnectedAt time.Time
@@ -45,14 +43,11 @@ type connection struct {
 	errors       int
 	state        ClientState
 	messagesSent int
-	// Response to be written to the connection (for debugging)
-	response bytes.Buffer
-	bufErr   error
 
-	bufin      *smtpBufferedReader
-	bufout     *bufio.Writer
-	smtpReader *textproto.Reader
-	ar         *adjustableLimitedReader
+	bufErr error
+
+	in *textproto.Reader
+	//out     *bufio.Writer
 	// guards access to conn
 	connGuard sync.Mutex
 	conn      net.Conn
@@ -61,32 +56,47 @@ type connection struct {
 	parser rfc5321.Parser
 }
 
+func (c *connection) resetIn() {
+	inLimit := io.LimitReader(c.conn, defaultMaxSize)
+	inBuf := bufio.NewReader(inLimit)
+	c.in = textproto.NewReader(inBuf)
+}
+
 // newConnection allocates a new connection.
 func newConnection(conn net.Conn, clientID uint64, logger *slog.Logger) *connection {
+
 	c := &connection{
 		conn: conn,
 
-		Envelope:    mail.NewEnvelope(conn.RemoteAddr(), clientID),
+		Envelope:    envelope.NewEnvelope(conn.RemoteAddr(), clientID),
 		ConnectedAt: time.Now(),
-		bufin:       newSMTPBufferedReader(conn),
-		bufout:      bufio.NewWriter(conn),
 
 		log: logger,
 	}
 
-	// used for reading the DATA state
-	c.smtpReader = textproto.NewReader(c.bufin.Reader)
+	c.resetIn()
+
 	return c
+}
+
+const commandSuffix = "\r\n"
+
+// Reads from the connection until a \n terminator is encountered,
+// or until a timeout occurs.
+func (conn *connection) readCommand() (string, error) {
+	//var input string
+	// In command state, stop reading at line breaks
+	cmd, err := conn.in.ReadLine()
+	if err != nil {
+		return "", err
+	}
+	return cmd, nil
 }
 
 // sendResponse adds a response to be written on the next turn
 // the response gets buffered
 func (c *connection) sendResponse(r ...interface{}) {
-	c.bufout.Reset(c.conn)
-	if c.log.Enabled(context.Background(), slog.LevelDebug) {
-		// an additional buffer so that we can log the response in debug mode only
-		c.response.Reset()
-	}
+
 	var out string
 	if c.bufErr != nil {
 		c.bufErr = nil
@@ -94,26 +104,23 @@ func (c *connection) sendResponse(r ...interface{}) {
 	for _, item := range r {
 		switch v := item.(type) {
 		case error:
-			out = v.Error()
+			out += v.Error()
 		case fmt.Stringer:
-			out = v.String()
+			out += v.String()
 		case string:
-			out = v
-		}
-		if _, c.bufErr = c.bufout.WriteString(out); c.bufErr != nil {
-			c.log.Error("could not write to c.bufout", "err", c.bufErr)
-		}
-		if c.log.Enabled(context.Background(), slog.LevelDebug) {
-			c.response.WriteString(out)
-		}
-		if c.bufErr != nil {
-			return
+			out += v
 		}
 	}
-	_, c.bufErr = c.bufout.WriteString("\r\n")
-	if c.log.Enabled(context.Background(), slog.LevelDebug) {
-		c.response.WriteString("\r\n")
+
+	c.log.Debug(("Server: " + out))
+
+	_, c.bufErr = c.conn.Write([]byte(out + commandSuffix))
+
+	if c.bufErr != nil {
+		c.log.Error("could not write to c.bufout", "err", c.bufErr)
+		return
 	}
+
 }
 
 // resetTransaction resets the SMTP transaction, ready for the next email (doesn't disconnect)
@@ -122,17 +129,17 @@ func (c *connection) sendResponse(r ...interface{}) {
 // -End of DATA command
 // TLS handshake
 func (c *connection) resetTransaction() {
-	c.Envelope = mail.NewEnvelope(c.RemoteAddr, c.ClientId)
+	c.Envelope = envelope.NewEnvelope(c.RemoteAddr, c.ClientId())
+	// to have a fresh limit
+	// TODO test and veriy this
+	c.resetIn()
 }
 
 // isInTransaction returns true if the connection is inside a transaction.
 // A transaction starts after a MAIL command gets issued by the connection.
 // Call resetTransaction to end the transaction
 func (c *connection) isInTransaction() bool {
-	if len(c.MailFrom.User) == 0 && !c.MailFrom.NullPath {
-		return false
-	}
-	return true
+	return c.MailFrom != nil && c.MailFrom.Address != ""
 }
 
 // kill flags the connection to close on the next turn
@@ -174,39 +181,39 @@ func (c *connection) upgradeTLS(tlsConfig *tls.Config) error {
 	}
 	// convert tlsConn to net.Conn
 	c.conn = net.Conn(tlsConn)
-	c.bufout.Reset(c.conn)
-	c.bufin.Reset(c.conn)
+
+	c.in = textproto.NewReader(bufio.NewReader(c.conn))
 	c.TLS = true
 	return err
 }
 
-type pathParser func([]byte) error
-
-func (c *connection) parsePath(in []byte, p pathParser) (mail.Address, error) {
-	address := mail.Address{}
-	var err error
-	if len(in) > rfc5321.LimitPath {
-		return address, errors.New(response.FailPathTooLong.String())
-	}
-	if err = p(in); err != nil {
-		return address, errors.New(response.FailInvalidAddress.String())
-	} else if c.parser.NullPath {
-		// bounce has empty from address
-		address = mail.Address{}
-	} else if len(c.parser.LocalPart) > rfc5321.LimitLocalPart {
-		err = errors.New(response.FailLocalPartTooLong.String())
-	} else if len(c.parser.Domain) > rfc5321.LimitDomain {
-		err = errors.New(response.FailDomainTooLong.String())
-	} else {
-		address = mail.Address{
-			User:       c.parser.LocalPart,
-			Host:       c.parser.Domain,
-			ADL:        c.parser.ADL,
-			PathParams: c.parser.PathParams,
-			NullPath:   c.parser.NullPath,
-			Quoted:     c.parser.LocalPartQuotes,
-			IP:         c.parser.IP,
-		}
-	}
-	return address, err
-}
+//type pathParser func([]byte) error
+//
+//func (c *connection) parsePath(in []byte, p pathParser) (envelope.Address, error) {
+//	address := envelope.Address{}
+//	var err error
+//	if len(in) > rfc5321.LimitPath {
+//		return address, errors.New(response.FailPathTooLong.String())
+//	}
+//	if err = p(in); err != nil {
+//		return address, errors.New(response.FailInvalidAddress.String())
+//	} else if c.parser.NullPath {
+//		// bounce has empty from address
+//		address = envelope.Address{}
+//	} else if len(c.parser.LocalPart) > rfc5321.LimitLocalPart {
+//		err = errors.New(response.FailLocalPartTooLong.String())
+//	} else if len(c.parser.Domain) > rfc5321.LimitDomain {
+//		err = errors.New(response.FailDomainTooLong.String())
+//	} else {
+//		address = envelope.Address{
+//			User:       c.parser.LocalPart,
+//			Host:       c.parser.Domain,
+//			ADL:        c.parser.ADL,
+//			PathParams: c.parser.PathParams,
+//			NullPath:   c.parser.NullPath,
+//			Quoted:     c.parser.LocalPartQuotes,
+//			IP:         c.parser.IP,
+//		}
+//	}
+//	return address, err
+//}
