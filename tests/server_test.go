@@ -1,26 +1,30 @@
-package brevx
+package tests
 
 import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"github.com/crholm/brevx"
 	"github.com/crholm/brevx/envelope"
-	"github.com/crholm/brevx/mocks"
+	"github.com/crholm/brevx/middleware"
+	"github.com/crholm/brevx/tests/mocks"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"log/slog"
 	"net"
 	"net/smtp"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-func StartTLSServer(inf string, t *testing.T) (<-chan *envelope.Envelope, *Server, *x509.CertPool) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+const hostname = "example.com"
 
-	hostname := "example.com"
+func StartTLSServer(inf string, t *testing.T, middlewares ...brevx.Middleware) (<-chan *envelope.Envelope, *brevx.Server, *x509.CertPool) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	rootCert, rootKey, err := mocks.GenerateRootCA()
 
@@ -34,13 +38,14 @@ func StartTLSServer(inf string, t *testing.T) (<-chan *envelope.Envelope, *Serve
 	}
 
 	mails := make(chan *envelope.Envelope, 10)
-	s := &Server{
-		Hostname: hostname,
-		Logger:   logger,
-		Addr:     inf,
-		Backend: BackendFunc(func(e *envelope.Envelope) Result {
+	s := &brevx.Server{
+		Hostname:    hostname,
+		Logger:      logger,
+		Addr:        inf,
+		Middlewares: middlewares,
+		Handler: brevx.HandlerOf(func(e *envelope.Envelope) brevx.Response {
 			mails <- e
-			return NewResult(250, "Added to spool")
+			return brevx.NewResponse(250, "Added to spool")
 		}),
 		TLSConfig: tlscfg,
 	}
@@ -55,16 +60,16 @@ func StartTLSServer(inf string, t *testing.T) (<-chan *envelope.Envelope, *Serve
 	return mails, s, mocks.RootCAPool(rootCert)
 }
 
-func StartServer(inf string) (<-chan *envelope.Envelope, *Server) {
+func StartServer(inf string) (<-chan *envelope.Envelope, *brevx.Server) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	mails := make(chan *envelope.Envelope, 10)
-	s := &Server{
+	s := &brevx.Server{
 		Logger: logger,
 		Addr:   inf,
-		Backend: BackendFunc(func(e *envelope.Envelope) Result {
+		Handler: brevx.HandlerOf(func(e *envelope.Envelope) brevx.Response {
 			mails <- e
-			return NewResult(250, "OK")
+			return brevx.NewResponse(250, "OK")
 		}),
 	}
 
@@ -166,10 +171,10 @@ func TestTLS(t *testing.T) {
 func TestStartStop(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	s := &Server{
+	s := &brevx.Server{
 		Logger: logger,
-		Backend: BackendFunc(func(e *envelope.Envelope) Result {
-			return NewResult(250, "OK")
+		Handler: brevx.HandlerOf(func(e *envelope.Envelope) brevx.Response {
+			return brevx.NewResponse(250, "OK")
 		}),
 	}
 
@@ -192,10 +197,10 @@ func TestStartStop(t *testing.T) {
 func TestStartStopTimout(t *testing.T) {
 	inf := ":2525"
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	s := Server{
+	s := brevx.Server{
 		Logger: logger,
-		Backend: BackendFunc(func(e *envelope.Envelope) Result {
-			return NewResult(250, "OK")
+		Handler: brevx.HandlerOf(func(e *envelope.Envelope) brevx.Response {
+			return brevx.NewResponse(250, "OK")
 		}),
 		Addr: inf,
 	}
@@ -240,11 +245,11 @@ func TestSendEmail(t *testing.T) {
 
 	envelopes := make(chan *envelope.Envelope, 1)
 
-	s := Server{
+	s := brevx.Server{
 		Logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		Backend: BackendFunc(func(e *envelope.Envelope) Result {
+		Handler: brevx.HandlerOf(func(e *envelope.Envelope) brevx.Response {
 			envelopes <- e
-			return NewResult(250, "OK")
+			return brevx.NewResponse(250, "OK")
 		}),
 		Addr: ":2525",
 	}
@@ -437,7 +442,7 @@ func TestSMTPServer(t *testing.T) {
 	// Setup - generate a test CA and server certificate
 	addr := ":2525"
 	// Create an SMTP server for testing
-	_, server, certPool := StartTLSServer(addr, t)
+	inbox, server, certPool := StartTLSServer(addr, t)
 	defer server.Shutdown(context.Background())
 
 	// Get the server address
@@ -446,48 +451,62 @@ func TestSMTPServer(t *testing.T) {
 	// Test cases
 	t.Run("Basic Email Sending", func(t *testing.T) {
 		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
-			"to@example.com", "Test Subject", "Test Body")
+			[]string{"to@example.com"}, "Test Subject", "Test Body")
 		require.NoError(t, err, "Should send email successfully")
+		m := <-inbox
+		require.Equal(t, "from@example.com", m.MailFrom.Address)
+		p, err := m.Headers()
+		require.NoError(t, err)
+		require.Equal(t, "Test Subject", p.Get("Subject"))
 	})
 
 	t.Run("Invalid Sender", func(t *testing.T) {
 		// Test with invalid sender format
 		err := SendEmailWithCustomCA(certPool, host, addr, "not-an-email",
-			"to@example.com", "Test Subject", "Test Body")
+			[]string{"to@example.com"}, "Test Subject", "Test Body")
+
 		require.Error(t, err, "Should reject invalid sender format")
 	})
 
 	t.Run("Invalid Recipient", func(t *testing.T) {
 		// Test with invalid recipient format
 		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
-			"not-an-email", "Test Subject", "Test Body")
+			[]string{"not-an-email"}, "Test Subject", "Test Body")
+
 		require.Error(t, err, "Should reject invalid recipient format")
 	})
 
-	//t.Run("Multiple Recipients", func(t *testing.T) {
-	//	// Test sending to multiple recipients
-	//	err := SendEmailWithMultipleRecipients(rootCert, host, port, "user", "pass", "from@example.com",
-	//		[]string{"to1@example.com", "to2@example.com"},
-	//		"Test Subject", "Test Body")
-	//	require.NoError(t, err, "Should handle multiple recipients")
-	//})
-	//
-	//t.Run("Large Message Body", func(t *testing.T) {
-	//	// Generate a large message body (1MB)
-	//	largeBody := strings.Repeat("Lorem ipsum dolor sit amet ", 25000)
-	//	err := SendEmailWithCustomCA(rootCert, host, port, "user", "pass", "from@example.com",
-	//		"to@example.com", "Large Email", largeBody)
-	//	require.NoError(t, err, "Should handle large message bodies")
-	//})
-	//
-	//t.Run("HTML Content", func(t *testing.T) {
-	//	// Test sending HTML content
-	//	htmlBody := "<html><body><h1>Test Email</h1><p>This is a <b>test</b> email with HTML content.</p></body></html>"
-	//	err := SendEmailWithHTMLContent(rootCert, host, port, "user", "pass", "from@example.com",
-	//		"to@example.com", "HTML Email", htmlBody)
-	//	require.NoError(t, err, "Should handle HTML content")
-	//})
-	//
+	t.Run("Multiple Recipients", func(t *testing.T) {
+		// Test sending to multiple recipients
+		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+			[]string{"to1@example.com", "to2@example.com"},
+			"Test Subject", "Test Body")
+
+		require.NoError(t, err, "Should handle multiple recipients")
+		<-inbox
+	})
+
+	t.Run("Large Message Body", func(t *testing.T) {
+		// Generate a large message body (1MB)
+		// 32byte * 32 * 1024 = 1MB
+		largeBody := strings.Repeat("Lorem ipsum dolor sit amet dore ", 32*1_024*1)
+		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+			[]string{"to1@example.com"}, "Large Email", largeBody)
+		require.NoError(t, err, "Should handle large message bodies")
+		m := <-inbox
+		body, err := m.Body()
+
+		require.NoError(t, err)
+		require.Equal(t, strings.TrimSpace(largeBody), strings.TrimSpace(string(body)))
+
+		// Generate a large message body (1MB)
+		// 32byte * 32 * 1024 = 1MB
+		toLargeBody := strings.Repeat("Lorem ipsum dolor sit amet dore ", 32*1_024*20)
+		err = SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+			[]string{"to1@example.com"}, "Large Email", toLargeBody)
+		require.Error(t, err, "Should not handle to large body")
+	})
+
 	//t.Run("With Attachments", func(t *testing.T) {
 	//	// Test sending an email with attachments
 	//	attachments := []Attachment{
@@ -547,8 +566,115 @@ func TestSMTPServer(t *testing.T) {
 	//})
 }
 
+func TestMiddlewareReturnPath(t *testing.T) {
+	// Setup - generate a test CA and server certificate
+	addr := ":2525"
+	// Create an SMTP server for testing
+	inbox, server, certPool := StartTLSServer(addr, t, middleware.AddReturnPath)
+	defer server.Shutdown(context.Background())
+
+	// Get the server address
+	host := server.Hostname
+	// Test cases
+	t.Run("Basic", func(t *testing.T) {
+		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+			[]string{"to@example.com"}, "Test Subject", "Test Body")
+		require.NoError(t, err, "Should send email successfully")
+
+		m := <-inbox
+		head, err := m.Headers()
+		require.NoError(t, err, "Should get headers successfully")
+
+		assert.Equal(t, "<from@example.com>", head.Get("Return-Path"))
+	})
+}
+
+func TestMiddlewareReceivedHeader(t *testing.T) {
+	// Setup - generate a test CA and server certificate
+	addr := ":2525"
+	// Create an SMTP server for testing
+	inbox, server, certPool := StartTLSServer(addr, t, middleware.AddReceivedHeaders(hostname))
+	defer server.Shutdown(context.Background())
+
+	// Get the server address
+	host := server.Hostname
+	// Test cases
+	t.Run("Basic", func(t *testing.T) {
+		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+			[]string{"to@example.com"}, "Test Subject", "Test Body")
+		require.NoError(t, err, "Should send email successfully")
+
+		m := <-inbox
+		head, err := m.Headers()
+		require.NoError(t, err, "Should get headers successfully")
+		fmt.Println(head.Get("Received"))
+		assert.Contains(t, head.Get("Received"), "to@example.com")
+		assert.Contains(t, head.Get("Received"), "localhost")
+		assert.Contains(t, head.Get("Received"), "127.0.0.1")
+		assert.Contains(t, head.Get("Received"), "example.com")
+	})
+}
+
+func TestMiddlewareOrder(t *testing.T) {
+
+	var res []string
+	adder := func(i int) brevx.Middleware {
+		return func(next brevx.HandlerFunc) brevx.HandlerFunc {
+			return func(e *envelope.Envelope) brevx.Response {
+				res = append(res, fmt.Sprintf("pre-%d", i))
+				defer func() { res = append(res, fmt.Sprintf("post-%d", i)) }()
+				return next(e)
+			}
+		}
+	}
+
+	stop := func(next brevx.HandlerFunc) brevx.HandlerFunc {
+		return func(e *envelope.Envelope) brevx.Response {
+			res = append(res, "stopped")
+			return brevx.NewResponse(550, "Stopped for no good reason")
+		}
+	}
+
+	// Setup - generate a test CA and server certificate
+	addr := ":2525"
+	// Create an SMTP server for testing
+	inbox, server, certPool := StartTLSServer(addr, t)
+	defer server.Shutdown(context.Background())
+
+	t.Run("Basic", func(t *testing.T) {
+
+		server.Middlewares = append([]brevx.Middleware{}, adder(0), adder(1), adder(2))
+		// Test cases
+		err := SendEmailWithCustomCA(certPool, server.Hostname, addr, "from@example.com",
+			[]string{"to@example.com"}, "Test Subject", "Test Body")
+		require.NoError(t, err, "Should send email successfully")
+		<-inbox
+
+		assert.Equal(t, []string{"pre-0", "pre-1", "pre-2", "post-2", "post-1", "post-0"}, res)
+		res = nil
+
+		err = SendEmailWithCustomCA(certPool, server.Hostname, addr, "from@example.com",
+			[]string{"to@example.com"}, "Test Subject", "Test Body")
+		require.NoError(t, err, "Should send email successfully")
+		<-inbox
+
+		assert.Equal(t, []string{"pre-0", "pre-1", "pre-2", "post-2", "post-1", "post-0"}, res)
+
+	})
+
+	t.Run("Early_Return", func(t *testing.T) {
+		server.Middlewares = append([]brevx.Middleware{}, adder(0), stop, adder(2))
+
+		err := SendEmailWithCustomCA(certPool, server.Hostname, addr, "from@example.com",
+			[]string{"to@example.com"}, "Test Subject", "Test Body")
+		require.ErrorContains(t, err, "Stopped for no good reason")
+
+		assert.Equal(t, []string{"pre-0", "stopped", "post-0"}, res)
+	})
+}
+
 // SendEmailWithCustomCA sends an email using SMTP with a custom CA certificate
-func SendEmailWithCustomCA(certPool *x509.CertPool, host string, addr string, from, to, subject, body string) error {
+func SendEmailWithCustomCA(certPool *x509.CertPool, host string, addr string, from string, to []string, subject, body string) error {
 	// Create a cert pool and add our CA
 
 	// Configure TLS with our cert pool
@@ -578,8 +704,10 @@ func SendEmailWithCustomCA(certPool *x509.CertPool, host string, addr string, fr
 	}
 
 	// Set the recipient
-	if err = c.Rcpt(to); err != nil {
-		return fmt.Errorf("failed to set recipient: %w", err)
+	for _, recipient := range to {
+		if err = c.Rcpt(recipient); err != nil {
+			return fmt.Errorf("failed to set recipient: %w", err)
+		}
 	}
 
 	// Send the email body

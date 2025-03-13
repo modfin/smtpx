@@ -1,7 +1,9 @@
-package brevx
+package tests
 
 import (
+	"github.com/crholm/brevx"
 	"github.com/crholm/brevx/envelope"
+	"github.com/crholm/brevx/tests/mocks"
 	"os"
 	"testing"
 
@@ -18,7 +20,6 @@ import (
 	"github.com/crholm/brevx/backends"
 	"github.com/crholm/brevx/log"
 	"github.com/crholm/brevx/mail"
-	"github.com/crholm/brevx/mocks"
 )
 
 // getMockServerConfig gets a mock ServerConfig struct used for creating a new Server
@@ -44,7 +45,7 @@ func getMockServerConfig() *ServerConfig {
 // getMockServerConn gets a new Server using sc. Server will be using a mocked TCP connection
 // using the dummy getBackend
 // RCP TO command only allows test.com host
-func getMockServerConn(sc *ServerConfig, t *testing.T) (*mocks.Conn, *Server) {
+func getMockServerConn(sc *ServerConfig, t *testing.T) (*mocks.Conn, *brevx.Server) {
 	var logOpenError error
 	var mainlog log.Logger
 	mainlog, logOpenError = log.GetLogger(sc.LogFile, "debug")
@@ -210,7 +211,7 @@ func TestTLSConfig(t *testing.T) {
 		return
 	}
 
-	s := Server{}
+	s := brevx.Server{}
 	s.setConfig(&ServerConfig{
 		TLS: ServerTLSConfig{
 			StartTLSOn:     true,
@@ -274,7 +275,7 @@ func TestHandleClient(t *testing.T) {
 	}
 	conn, server := getMockServerConn(sc, t)
 	// call the serve.handleConn() func in a goroutine.
-	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
+	client := brevx.newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -318,7 +319,7 @@ func TestGithubIssue197(t *testing.T) {
 	// [2001:DB8::FF00:42:8329] is an address literal
 	server.setAllowedHosts([]string{"1.1.1.1", "[2001:DB8::FF00:42:8329]"})
 
-	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
+	client := brevx.newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -430,7 +431,7 @@ func TestGithubIssue198(t *testing.T) {
 
 	server.setAllowedHosts([]string{"1.1.1.1", "[2001:DB8::FF00:42:8329]"})
 
-	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
+	client := brevx.newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	client.RemoteAddr = "127.0.0.1"
 
 	var wg sync.WaitGroup
@@ -492,7 +493,7 @@ func TestGithubIssue198(t *testing.T) {
 	wg.Wait() // wait for handleConn to exit
 }
 
-func sendMessage(greet string, TLS bool, w *textproto.Writer, t *testing.T, line string, r *textproto.Reader, err error, client *connection) string {
+func sendMessage(greet string, TLS bool, w *textproto.Writer, t *testing.T, line string, r *textproto.Reader, err error, client *brevx.connection) string {
 	if err := w.PrintfLine(greet + " test.test.com"); err != nil {
 		t.Error(err)
 	}
@@ -539,11 +540,11 @@ func TestGithubIssue199(t *testing.T) {
 		mainlog.WithError(logOpenError).Errorf("Failed creating a Logger for mock conn [%s]", sc.ListenInterface)
 	}
 	conn, server := getMockServerConn(sc, t)
-	server.Backend.Start()
+	server.Handler.Start()
 
 	server.setAllowedHosts([]string{"grr.la", "fake.com", "[1.1.1.1]", "[2001:db8::8a2e:370:7334]", "saggydimes.test.com"})
 
-	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
+	client := brevx.newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -721,7 +722,7 @@ func TestGithubIssue200(t *testing.T) {
 	server.Backend().Start()
 	server.setAllowedHosts([]string{"1.1.1.1", "[2001:DB8::FF00:42:8329]"})
 
-	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
+	client := brevx.newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -775,7 +776,7 @@ func TestGithubIssue201(t *testing.T) {
 	// it will be used for rcpt to:<postmaster> which does not specify a host
 	server.setAllowedHosts([]string{"a.com", "saggydimes.test.com"})
 
-	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
+	client := brevx.newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -859,7 +860,7 @@ func TestXClient(t *testing.T) {
 	}
 	conn, server := getMockServerConn(sc, t)
 	// call the serve.handleConn() func in a goroutine.
-	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
+	client := brevx.newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -919,7 +920,7 @@ func TestProxy(t *testing.T) {
 	}
 	conn, server := getMockServerConn(sc, t)
 	// call the serve.handleConn() func in a goroutine.
-	client := newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
+	client := brevx.newConnection(conn.Server, 1, mainlog, mail.NewPool(5))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -1143,7 +1144,7 @@ func TestGatewayPanic(t *testing.T) {
 
 func TestAllowsHosts(t *testing.T) {
 	defer cleanTestArtifacts(t)
-	s := Server{}
+	s := brevx.Server{}
 	allowedHosts := []string{
 		"spam4.me",
 		"grr.la",

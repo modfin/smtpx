@@ -11,8 +11,6 @@ import (
 	"net/textproto"
 	"sync"
 	"time"
-
-	"github.com/crholm/brevx/mail/rfc5321"
 )
 
 // ClientState indicates which part of the SMTP transaction a given connection is in.
@@ -52,8 +50,7 @@ type connection struct {
 	connGuard sync.Mutex
 	conn      net.Conn
 
-	log    *slog.Logger
-	parser rfc5321.Parser
+	log *slog.Logger
 }
 
 func (c *connection) resetIn() {
@@ -73,7 +70,6 @@ func newConnection(conn net.Conn, clientID uint64, logger *slog.Logger) *connect
 
 		log: logger.With("id", clientID, "ip", conn.RemoteAddr()),
 	}
-
 	c.resetIn()
 
 	return c

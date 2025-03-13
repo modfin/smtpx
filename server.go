@@ -5,48 +5,31 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"github.com/crholm/brevx/responses"
 	"io"
 	"log/slog"
 	"net"
 	"net/mail"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/crholm/brevx/mail/rfc5321"
-	"github.com/crholm/brevx/response"
 )
-
-const (
-	CommandVerbMaxLength = 16
-	CommandLineMaxLength = 1024
-
-	// Number of allowed unrecognized commands before we terminate the connection
-	MaxUnrecognizedCommands = 5
-)
-
-const (
-	// Server has just been created
-	ServerStateNew = iota
-	// Server has just been stopped
-	ServerStateStopped
-	// Server has been started and is running
-	ServerStateRunning
-	// Server could not start due to an error
-	ServerStateStartError
-)
-
-const defaultMaxClients = 100
-const defaultTimeout = 30
-const defaultInterface = ":2525"
-const defaultMaxSize = 10_485_760 // int64(10 << 20) // 10 Megabytes
 
 // Server listens for SMTP clients on the port specified in its config
 type Server struct {
-	Logger  *slog.Logger
-	Backend Backend
+	Logger *slog.Logger
+
+	// Middlewares will be run in the order they are specified before backend is called
+	// m1 -> m2 -> Handler
+	//               V
+	// m1 <- m2 <- Handler
+	Middlewares []Middleware
+
+	// Handler will be receiving envelopes after the Data command
+	Handler Handler
 
 	// TLSConfig will be used when TLS is enabled
 	TLSConfig *tls.Config
@@ -65,10 +48,14 @@ type Server struct {
 	// MaxSize is the maximum size of an email that will be accepted for delivery.
 	// Defaults to 10 Mebibytes
 	MaxSize int64
+
 	// Timeout specifies the connection timeout in seconds. Defaults to 30
+	// TODO: Implment this
 	Timeout int
+
 	// MaxClients controls how many maximum clients we can handle at once.
 	// Defaults to defaultMaxClients
+	// TODO: Implment this
 	MaxClients int
 
 	// XClientOn when using a proxy such as Nginx, XCLIENT command is used to pass the
@@ -76,12 +63,24 @@ type Server struct {
 	XClientOn bool
 	ProxyOn   bool
 
+	// MaxRecipients is the maximum number of recipients allowed in a single RCPT command
+	// Defaults to defaultMaxRecipients = 100
+	MaxRecipients int
+
+	// MaxUnrecognizedCommands is the maximum number of unrecognized commands allowed before the server terminates
+	// the connection, defaults to defaultMaxUnrecognizedCommands = 5
+	MaxUnrecognizedCommands int
+
 	listener         net.Listener
 	closedListener   chan struct{}
 	wgConnections    sync.WaitGroup
 	countConnections atomic.Int64
 
 	state int
+}
+
+func (s *Server) Use(middleware ...Middleware) {
+	s.Middlewares = append(s.Middlewares, middleware...)
 }
 
 func (c *Server) setDefaults() error {
@@ -109,6 +108,14 @@ func (c *Server) setDefaults() error {
 		c.MaxSize = defaultMaxSize // 10 Mebibytes
 	}
 
+	if c.MaxRecipients == 0 {
+		c.MaxRecipients = defaultMaxRecipients
+	}
+
+	if c.MaxUnrecognizedCommands == 0 {
+		c.MaxUnrecognizedCommands = defaultMaxUnrecognizedCommands
+	}
+
 	if c.closedListener == nil {
 		c.closedListener = make(chan struct{})
 	}
@@ -126,7 +133,7 @@ type command string
 
 var (
 	cmdHELO     command = "HELO "
-	cmdEHLO     command = "EHLO"
+	cmdEHLO     command = "EHLO "
 	cmdHELP     command = "HELP"
 	cmdXCLIENT  command = "XCLIENT "
 	cmdMAIL     command = "MAIL FROM:"
@@ -139,6 +146,8 @@ var (
 	cmdSTARTTLS command = "STARTTLS"
 	cmdPROXY    command = "PROXY "
 )
+
+var commands = []command{cmdHELO, cmdEHLO, cmdXCLIENT, cmdMAIL, cmdRCPT, cmdRSET, cmdVRFY, cmdNOOP, cmdQUIT, cmdDATA, cmdSTARTTLS, cmdPROXY, cmdHELP}
 
 func (c command) match(cmd string) bool {
 	return strings.HasPrefix(strings.ToUpper(cmd), string(c))
@@ -288,7 +297,7 @@ func (s *Server) handleConn(conn *connection) {
 				return
 			}
 			if errors.Is(err, LineLimitExceeded) {
-				conn.sendResponse(response.FailLineTooLong)
+				conn.sendResponse(responses.FailLineTooLong)
 				conn.kill()
 				return
 			}
@@ -312,10 +321,11 @@ func (s *Server) handleConn(conn *connection) {
 				// helo = "HELO" SP Domain CRLF
 				// HELO example.com\r\n
 				// HELO 192.168.1.10\r\n
-				content := cmdHELO.content(cmd)
-				conn.Helo = strings.TrimSpace(string(content)) // TODO parse domain or IP address
-
 				conn.resetTransaction()
+
+				content := cmdHELO.content(cmd)
+				conn.Helo = strings.TrimSpace(content) // TODO parse domain or IP address
+
 				conn.sendResponse(helo)
 				continue
 
@@ -331,11 +341,13 @@ func (s *Server) handleConn(conn *connection) {
 				// EHLO mail.example.com\r\n
 				// EHLO [192.168.1.10]\r\n
 				// EHLO [IPv6:2001:0db8:85a3:0000:0000:8a2e:0370:7334]\r\n
-				content := cmdHELO.content(cmd)
-				conn.Helo = strings.TrimSpace(string(content))
 
-				conn.ESMTP = true
 				conn.resetTransaction()
+
+				content := cmdHELO.content(cmd)
+				conn.Helo = strings.TrimSpace(content)
+				conn.ESMTP = true
+
 				conn.sendResponse(ehlo,
 					messageSize,
 					pipelining,
@@ -345,8 +357,21 @@ func (s *Server) handleConn(conn *connection) {
 				continue
 
 			case cmdHELP.match(cmd):
-				quote := response.GetQuote()
-				conn.sendResponse("214-OK\r\n", quote)
+				// Client: HELP
+				// Server: 214-Supported commands:
+				// Server: 214-HELO EHLO MAIL RCPT DATA RSET NOOP QUIT VRFY EXPN HELP
+				// Server: 214 End of HELP info
+				coms := make([]string, 0, len(commands))
+				for _, c := range commands {
+					c := string(c)
+					c, _, _ = strings.Cut(c, " ")
+					coms = append(coms, c)
+				}
+
+				conn.sendResponse(
+					"214-Supported commands:\r\n",
+					fmt.Sprintf("214-%s\r\n", strings.Join(coms, " ")),
+					"214 End of HELP info")
 				continue
 
 			case cmdXCLIENT.match(cmd) && s.XClientOn:
@@ -372,7 +397,7 @@ func (s *Server) handleConn(conn *connection) {
 						}
 					}
 				}
-				conn.sendResponse(response.SuccessMailCmd)
+				conn.sendResponse(responses.SuccessMailCmd)
 				continue
 
 			case cmdPROXY.match(cmd) && s.ProxyOn:
@@ -401,7 +426,7 @@ func (s *Server) handleConn(conn *connection) {
 					continue
 				default:
 					conn.log.Error("PROXY parse error, expected 5 or 6 parts", "data", content)
-					conn.sendResponse(response.FailSyntaxError)
+					conn.sendResponse(responses.FailSyntaxError)
 					continue
 				}
 
@@ -410,7 +435,7 @@ func (s *Server) handleConn(conn *connection) {
 				// This is the SMTP command that specifies the sender's email address.
 				// Used for the Return-Path header
 				if conn.isInTransaction() {
-					conn.sendResponse(response.FailNestedMailCmd)
+					conn.sendResponse(responses.FailNestedMailCmd)
 					conn.errors++
 					continue
 				}
@@ -418,65 +443,51 @@ func (s *Server) handleConn(conn *connection) {
 				conn.MailFrom, err = mail.ParseAddress(string(content))
 				if err != nil {
 					conn.log.Error("MAIL parse error", "data", "["+string(content)+"]", "err", err)
-					conn.sendResponse(response.RejectedSenderMailCmd)
+					conn.sendResponse(responses.RejectedSenderMailCmd)
 					conn.errors++
 					continue
 				}
 
-				// Hook to Backend to check if it alloed
-				err = s.Backend.Mail(conn.Envelope, conn.MailFrom)
-				if err != nil { // indicates that we should abort
-					conn.log.Error("MAIL hook error", "data", "["+string(content)+"]", "err", err)
-					conn.sendResponse(response.RejectedSenderMailCmd)
-					conn.errors++
-					continue
-				}
+				// TODO CMD add hook system
 
-				conn.sendResponse(response.SuccessMailCmd)
+				conn.sendResponse(responses.SuccessMailCmd)
 				continue
 
 			case cmdRCPT.match(cmd):
 				// Client: RCPT TO:<recipient@example.com>
 				// This is the SMTP command that specifies the recipient's email address.
-				if len(conn.RcptTo) > rfc5321.LimitRecipients {
-					conn.sendResponse(response.ErrorTooManyRecipients)
+				if len(conn.RcptTo) > s.MaxRecipients {
+					conn.sendResponse(responses.ErrorTooManyRecipients)
 					conn.errors++
 					continue
 				}
 				content := cmdRCPT.content(cmd)
 				to, err := mail.ParseAddress(content)
 				if err != nil {
-					conn.log.Error("RCPT parse error", "data", "["+string(content)+"]", "err", err)
-					conn.sendResponse(response.FailSyntaxError)
+					conn.log.Error("RCPT parse error", "data", content, "err", err)
+					conn.sendResponse(responses.FailSyntaxError)
 					conn.errors++
 					continue
 				}
 
-				// Hook to Backend to check if ut i is allowed
-				err = s.Backend.Rcpt(conn.Envelope, to)
-				if err != nil { // indicates that we should abort
-					conn.log.Error("RCPT hook error", "data", "["+string(content)+"]", "err", err)
-					conn.sendResponse(response.RejectedRcptCmd)
-					conn.errors++
-					continue
-				}
+				// TODO CMD add hook system
 
 				conn.RcptTo = append(conn.RcptTo, to)
-				conn.sendResponse(response.SuccessRcptCmd)
+				conn.sendResponse(responses.SuccessRcptCmd)
 				continue
 
 			case cmdRSET.match(cmd):
 				// Client: RSET
 				// The client then decides to abort this transaction and sends the RSET command.
 				conn.resetTransaction()
-				conn.sendResponse(response.SuccessResetCmd)
+				conn.sendResponse(responses.SuccessResetCmd)
 				continue
 
 			case cmdVRFY.match(cmd):
 				// Client: VRFY user@example.com
 				//The SMTP VRFY command is designed to verify the existence of a mailbox or user on a mail serve
 				//Due to these security concerns, most modern SMTP servers have disabled or severely restricted the VRFY command.
-				conn.sendResponse(response.SuccessVerifyCmd)
+				conn.sendResponse(responses.SuccessVerifyCmd)
 				continue
 
 			case cmdNOOP.match(cmd):
@@ -485,13 +496,13 @@ func (s *Server) handleConn(conn *connection) {
 				// - Check if the server is still alive and responsive.
 				// - Keep the connection alive during periods of inactivity.
 				// - Test the server's response.
-				conn.sendResponse(response.SuccessNoopCmd)
+				conn.sendResponse(responses.SuccessNoopCmd)
 				continue
 
 			case cmdQUIT.match(cmd):
 				// Client: QUIT
 				// The QUIT command is the standard way for an SMTP client to gracefully close a connection to an SMTP server.
-				conn.sendResponse(response.SuccessQuitCmd)
+				conn.sendResponse(responses.SuccessQuitCmd)
 				conn.kill()
 				return
 
@@ -499,10 +510,10 @@ func (s *Server) handleConn(conn *connection) {
 				// Client: DATA
 				// The DATA command in SMTP is used to initiate the transfer of the email message content,
 				if len(conn.RcptTo) == 0 {
-					conn.sendResponse(response.FailNoRecipientsDataCmd)
+					conn.sendResponse(responses.FailNoRecipientsDataCmd)
 					break
 				}
-				conn.sendResponse(response.SuccessDataCmd)
+				conn.sendResponse(responses.SuccessDataCmd)
 				conn.state = ConnData
 
 			case cmdSTARTTLS.match(cmd):
@@ -511,20 +522,20 @@ func (s *Server) handleConn(conn *connection) {
 				// [TLS handshake occurs here]
 
 				if s.TLSConfig == nil {
-					conn.sendResponse(response.FailCommandNotImplemented)
+					conn.sendResponse(responses.FailCommandNotImplemented)
 					continue
 				}
 
-				conn.sendResponse(response.SuccessStartTLSCmd)
+				conn.sendResponse(responses.SuccessStartTLSCmd)
 				conn.state = ConnStartTLS
 				continue
 			default:
 				conn.errors++
-				if conn.errors >= MaxUnrecognizedCommands {
-					conn.sendResponse(response.FailMaxUnrecognizedCmd)
+				if conn.errors >= s.MaxUnrecognizedCommands {
+					conn.sendResponse(responses.FailMaxUnrecognizedCmd)
 					conn.kill()
 				} else {
-					conn.sendResponse(response.FailUnrecognizedCmd)
+					conn.sendResponse(responses.FailUnrecognizedCmd)
 				}
 			}
 
@@ -535,20 +546,20 @@ func (s *Server) handleConn(conn *connection) {
 			// TODO make a limit to readers...
 			//conn.bufin.setLimit(s.MaxSize + 1024000) // This a hard limit.
 
-			n, err := conn.Data.ReadFrom(conn.in.DotReader())
+			n, err := conn.Envelope.Data.ReadFrom(conn.in.DotReader())
 			if n > s.MaxSize {
 				err = fmt.Errorf("maximum DATA size exceeded (%d)", s.MaxSize)
 			}
 			if err != nil {
 				conn.log.Error("error reading data", "err", err)
 				if errors.Is(err, LineLimitExceeded) {
-					conn.sendResponse(response.FailReadLimitExceededDataCmd, " ", LineLimitExceeded.Error())
+					conn.sendResponse(responses.FailReadLimitExceededDataCmd, " ", LineLimitExceeded.Error())
 					conn.kill()
 				} else if errors.Is(err, MessageSizeExceeded) {
-					conn.sendResponse(response.FailMessageSizeExceeded, " ", MessageSizeExceeded.Error())
+					conn.sendResponse(responses.FailMessageSizeExceeded, " ", MessageSizeExceeded.Error())
 					conn.kill()
 				} else {
-					conn.sendResponse(response.FailReadErrorDataCmd, " ", err.Error())
+					conn.sendResponse(responses.FailReadErrorDataCmd, " ", err.Error())
 					conn.kill()
 				}
 				conn.log.Warn("Error reading data", "err", err)
@@ -556,16 +567,39 @@ func (s *Server) handleConn(conn *connection) {
 				continue
 			}
 
-			res := s.Backend.Process(conn.Envelope)
-			if res.Class() == 2 {
+			middlewares := append([]Middleware{}, s.Middlewares...)
+			slices.Reverse(middlewares)
+
+			var start HandlerFunc = s.Handler.Data
+			for _, middleware := range middlewares {
+				if middleware == nil {
+					continue
+				}
+				start = middleware(start)
+			}
+			resp := start(conn.Envelope)
+
+			if resp == nil {
+				resp = responses.SuccessMessageAccepted
+			}
+			if resp.Class() != responses.ClassSuccess { // indicates that we should abort
+				conn.log.Info("Data processing failed", "response", resp.String())
+				conn.sendResponse(resp)
+				conn.errors++
+				continue
+			}
+			if resp.Class() == responses.ClassSuccess {
 				conn.messagesSent++
 			}
-			conn.sendResponse(res)
+
+			conn.sendResponse(resp)
+
 			conn.state = ConnCmd
 			if s.isShuttingDown() {
 				conn.state = ConnShutdown
 			}
 			conn.resetTransaction()
+
 			continue
 
 		case ConnStartTLS:
@@ -594,7 +628,7 @@ func (s *Server) handleConn(conn *connection) {
 
 		case ConnShutdown:
 			// shutdown state
-			conn.sendResponse(response.ErrorShutdown)
+			conn.sendResponse(responses.ErrorShutdown)
 			conn.kill()
 
 		}

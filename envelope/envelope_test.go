@@ -133,7 +133,7 @@ func TestEnvelope(t *testing.T) {
 	if len(data) != e.Data.Len() {
 		t.Error("e.Len() is incorrect, it shown ", e.Data.Len(), " but we wanted ", len(data))
 	}
-	headers, err := e.ParseHeaders()
+	headers, err := e.Headers()
 	if err != nil && !errors.Is(err, io.EOF) {
 		t.Error("cannot parse headers:", err)
 		return
@@ -186,7 +186,7 @@ func TestEnvelopeLargeHeader(t *testing.T) {
 	if len(data) != e.Data.Len() {
 		t.Error("e.Len() is incorrect, it shown ", e.Data.Len(), " but we wanted ", len(data))
 	}
-	headers, err := e.ParseHeaders()
+	headers, err := e.Headers()
 
 	if err != nil && !errors.Is(err, io.EOF) {
 		t.Error("cannot parse headers:", err)

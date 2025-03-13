@@ -2,45 +2,34 @@ package brevx
 
 import (
 	"github.com/crholm/brevx/envelope"
-	"net/mail"
 )
 
-// Backend is process received mail. Depending on the implementation, they can store mail in the database,
+type Middleware func(next HandlerFunc) HandlerFunc
+type HandlerFunc func(*envelope.Envelope) Response
+
+// Handler is process received mail. Depending on the implementation, they can store mail in the database,
 // write to a file, check for spam, re-transmit to another Server, etc.
-// Must return an SMTP message (i.e. "250 OK") and a boolean indicating
-// whether the message was processed successfully.
-type Backend interface {
-
-	// Mail is a hook from smtp server to Backend if from is allowed.
-	Mail(e *envelope.Envelope, from *mail.Address) error
-
-	// Rcpt is hook from smtp server to Backend if to is allowed.
-	Rcpt(e *envelope.Envelope, to *mail.Address) error
-
-	// Process processes then saves the mail envelope
-	Process(*envelope.Envelope) Result
+//
+// Returning nil will translate to 250 OK Response
+// Returning a non 2xx Response will abort the transaction
+type Handler interface {
+	// Data processes then saves the mail envelope
+	// Success should return nil or responses.SuccessMessageQueued
+	Data(*envelope.Envelope) Response
 }
 
-func BackendFunc(processor func(*envelope.Envelope) Result) Backend {
-	return ProcessFunc(processor)
+func HandlerOf(handler HandlerFunc) Handler {
+	return dataFunc(handler)
 }
 
-// ProcessFunc is a function that processes then saves the mail envelope
-type ProcessFunc func(*envelope.Envelope) Result
+// DataFunc is a function that processes then saves the mail envelope
+type dataFunc func(*envelope.Envelope) Response
 
-// Process Make ProcessWith will satisfy the Processor interface
-func (f ProcessFunc) Process(e *envelope.Envelope) Result {
+// Data Make ProcessWith will satisfy the Processor interface
+func (f dataFunc) Data(e *envelope.Envelope) Response {
 	return f(e)
 }
 
-func (f ProcessFunc) Mail(e *envelope.Envelope, from *mail.Address) error {
+var NoopBackend Handler = HandlerOf(func(e *envelope.Envelope) Response {
 	return nil
-}
-
-func (f ProcessFunc) Rcpt(e *envelope.Envelope, to *mail.Address) error {
-	return nil
-}
-
-var NoopBackend Backend = BackendFunc(func(e *envelope.Envelope) Result {
-	return NewResult(250, "OK")
 })

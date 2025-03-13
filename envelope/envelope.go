@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/crholm/brevx/utils"
+	"io"
 	"net"
 	"net/mail"
 	"net/textproto"
@@ -49,13 +51,21 @@ func (e *Envelope) WithContext(ctx context.Context) {
 
 func (e *Envelope) ClientId() uint64 {
 	ctx := e.Context()
-	u, _ := ctx.Value("clientID").(uint64)
+	u, _ := ctx.Value("client-id").(uint64)
+	return u
+}
+func (e *Envelope) EnvelopeId() string {
+	ctx := e.Context()
+	u, _ := ctx.Value("envelope-id").(string)
 	return u
 }
 
 func NewEnvelope(remoteAddr net.Addr, clientID uint64) *Envelope {
+	ctx := context.WithValue(context.Background(), "client-id", clientID)
+	ctx = context.WithValue(ctx, "envelope-id", utils.XID())
+
 	return &Envelope{
-		ctx:        context.WithValue(context.Background(), "clientID", clientID),
+		ctx:        ctx,
 		RemoteAddr: remoteAddr,
 		Data:       &Data{},
 	}
@@ -67,15 +77,30 @@ func (e *Envelope) AddHeader(key, value string) error {
 	return err
 }
 
-// ParseHeaders parses the headers from Envelope
-func (e *Envelope) ParseHeaders() (textproto.MIMEHeader, error) {
+// Headers parses the headers from Envelope
+func (e *Envelope) Headers() (textproto.MIMEHeader, error) {
 	header, _, found := bytes.Cut(e.Data.Bytes(), []byte{'\n', '\n'}) // the first two new-lines chars are the End Of Header
 
 	if !found {
 		return nil, errors.New("could not find headers")
 	}
 	headerReader := textproto.NewReader(bufio.NewReader(bytes.NewBuffer(header)))
-	return headerReader.ReadMIMEHeader()
+
+	h, err := headerReader.ReadMIMEHeader()
+	if errors.Is(err, io.EOF) {
+		err = nil
+	}
+	return h, err
+}
+
+// Body returns the email body
+func (e *Envelope) Body() ([]byte, error) {
+	_, body, found := bytes.Cut(e.Data.Bytes(), []byte{'\n', '\n'}) // the first two new-lines chars are the End Of Header
+
+	if !found {
+		return nil, errors.New("could not find body")
+	}
+	return body, nil
 }
 
 func HeaderSubject(headers textproto.MIMEHeader) (*mail.Address, error) {
