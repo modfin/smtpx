@@ -1,10 +1,10 @@
-module github.com/crholm/brevx/tests
+module github.com/modfin/smtpx/tests
 
 go 1.24.1
 
 require (
-	github.com/crholm/brevx v0.0.0
-	github.com/crholm/brevx/middleware v0.0.0
+	github.com/modfin/smtpx v0.0.0
+	github.com/modfin/smtpx/middleware v0.0.0
 	github.com/stretchr/testify v1.10.0
 )
 
@@ -18,6 +18,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/crholm/brevx => ..
+replace github.com/modfin/smtpx => ..
 
-replace github.com/crholm/brevx/middleware => ../middleware
+replace github.com/modfin/smtpx/middleware => ../middleware

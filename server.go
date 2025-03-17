@@ -1,11 +1,11 @@
-package brevx
+package smtpx
 
 import (
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"github.com/crholm/brevx/responses"
+	"github.com/modfin/smtpx/responses"
 	"io"
 	"log/slog"
 	"net"

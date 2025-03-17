@@ -1,9 +1,9 @@
-package brevx
+package smtpx
 
 import (
 	"crypto/tls"
 	"fmt"
-	"github.com/crholm/brevx/envelope"
+	"github.com/modfin/smtpx/envelope"
 	"log/slog"
 	"net"
 	"sync"

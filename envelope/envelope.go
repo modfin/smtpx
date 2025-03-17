@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/crholm/brevx/utils"
+	"github.com/modfin/smtpx/utils"
 	"net"
 	"net/mail"
 	"net/textproto"
@@ -59,6 +59,16 @@ func (e *Envelope) EnvelopeId() string {
 	ctx := e.Context()
 	u, _ := ctx.Value("envelope-id").(string)
 	return u
+}
+
+func (e *Envelope) GetError() error {
+	ctx := e.Context()
+	u, _ := ctx.Value("err").(error)
+	return u
+}
+
+func (e *Envelope) SetError(err error) {
+	e.ctx = context.WithValue(e.Context(), "err", err)
 }
 
 func NewEnvelope(remoteAddr net.Addr, connectionId uint64) *Envelope {

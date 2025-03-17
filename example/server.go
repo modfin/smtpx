@@ -1,26 +1,3 @@
-
-# SMTPX
-
-> A lightweight SMTP server package written in Go that feels familiar.
-
-
-## Installation
-
-```bash
-go get github.com/modfin/smtpx
-```
-
-Middleware
-```bash
-go get github.com/modfin/smtpx/middleware
-```
-
-## Usage
-
-One idea for smtpx is to have it feel familiar and have the same feel as the standard library has for `net/http`.
-
-```go
-
 package main
 
 import (
@@ -114,29 +91,3 @@ func main() {
 		slog.Default().Error("failed to start server", "err", err)
 	}
 }
-
-
-
-```
-
-
-## Tribute
-
-### A Fork
-`smtpx` started out as a fork of `go-guerrilla` but there is very little left from the original project.
-The goal is quite different for `smtpx`, and pretty much everything has been rewritten in 
-a more go-like way focused on have `smtpx` work as a package and not a stand-alone server.   
-
-https://github.com/phires/go-guerrilla (original https://github.com/flashmob/go-guerrilla)
-
-### Other projects
-
-There are a few other smtp servers written in go, so please have look before using `smtpx`.
-
-- https://github.com/emersion/go-smtp
-- https://github.com/phires/go-guerrilla
-- https://github.com/foxcpp/maddy
-
-
-### License
-MIT

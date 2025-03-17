@@ -36,7 +36,7 @@ type response struct {
 	comment string
 }
 
-func (r *response) Code() int {
+func (r *response) StatusCode() int {
 	if r.basicCode == 0 {
 		r.basicCode = getBasicStatusCode(EnhancedStatusCode{r.class, r.enhancedCode})
 	}
@@ -54,7 +54,7 @@ func (r *response) String() string {
 	}
 
 	class := class(r.Class())
-	basicCode := r.Code()
+	basicCode := r.StatusCode()
 	enhancedCode := EnhancedStatusCode{class, r.enhancedCode}
 	comment := r.comment
 

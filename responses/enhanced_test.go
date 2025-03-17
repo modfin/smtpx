@@ -1,7 +1,7 @@
 package responses
 
 import (
-	"github.com/crholm/brevx"
+	"github.com/modfin/smtpx"
 	"testing"
 )
 
@@ -22,7 +22,7 @@ func TestGetBasicStatusCode(t *testing.T) {
 // TestString for the String function
 func TestCustomString(t *testing.T) {
 	// Basic testing
-	resp := &brevx.Response{
+	resp := &smtpx.Response{
 		EnhancedCode: OtherStatus,
 		BasicCode:    200,
 		Class:        ClassSuccess,
@@ -34,7 +34,7 @@ func TestCustomString(t *testing.T) {
 	}
 
 	// Default String
-	resp2 := &brevx.Response{
+	resp2 := &smtpx.Response{
 		EnhancedCode: OtherStatus,
 		Class:        ClassSuccess,
 	}

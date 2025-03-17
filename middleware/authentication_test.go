@@ -1,9 +1,9 @@
 package middleware
 
 import (
-	"github.com/crholm/brevx"
-	"github.com/crholm/brevx/envelope"
-	"github.com/crholm/brevx/middleware/authres"
+	"github.com/modfin/smtpx"
+	"github.com/modfin/smtpx/envelope"
+	"github.com/modfin/smtpx/middleware/authres"
 	"log/slog"
 	"net"
 	"net/mail"
@@ -25,8 +25,8 @@ func TestAddAuthenticationResult(t *testing.T) {
 	}
 
 	// Create a mock next handler that just returns a success response
-	nextHandler := func(e *envelope.Envelope) brevx.Response {
-		return brevx.NewResponse(250, "OK")
+	nextHandler := func(e *envelope.Envelope) smtpx.Response {
+		return smtpx.NewResponse(250, "OK")
 	}
 
 	// Create the middleware
@@ -40,7 +40,7 @@ func TestAddAuthenticationResult(t *testing.T) {
 	resp := handler(e)
 
 	// Check that the response is passed through correctly
-	if resp.Code() != 250 {
+	if resp.StatusCode() != 250 {
 		t.Errorf("Expected response {250 OK}, got %v", resp)
 	}
 

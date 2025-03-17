@@ -5,10 +5,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"github.com/crholm/brevx"
-	"github.com/crholm/brevx/envelope"
-	"github.com/crholm/brevx/middleware"
-	"github.com/crholm/brevx/tests/mocks"
+	"github.com/modfin/smtpx"
+	"github.com/modfin/smtpx/envelope"
+	"github.com/modfin/smtpx/middleware"
+	"github.com/modfin/smtpx/tests/mocks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"log/slog"
@@ -23,7 +23,7 @@ import (
 
 const hostname = "example.com"
 
-func StartTLSServer(inf string, t *testing.T, middlewares ...brevx.Middleware) (<-chan *envelope.Envelope, *brevx.Server, *x509.CertPool) {
+func StartTLSServer(inf string, t *testing.T, middlewares ...smtpx.Middleware) (<-chan *envelope.Envelope, *smtpx.Server, *x509.CertPool) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	rootCert, rootKey, err := mocks.GenerateRootCA()
@@ -38,14 +38,14 @@ func StartTLSServer(inf string, t *testing.T, middlewares ...brevx.Middleware) (
 	}
 
 	mails := make(chan *envelope.Envelope, 10)
-	s := &brevx.Server{
+	s := &smtpx.Server{
 		Hostname:    hostname,
 		Logger:      logger,
 		Addr:        inf,
 		Middlewares: middlewares,
-		Handler: brevx.HandlerOf(func(e *envelope.Envelope) brevx.Response {
+		Handler: smtpx.NewHandler(func(e *envelope.Envelope) smtpx.Response {
 			mails <- e
-			return brevx.NewResponse(250, "Added to spool")
+			return smtpx.NewResponse(250, "Added to spool")
 		}),
 		TLSConfig: tlscfg,
 	}
@@ -60,16 +60,16 @@ func StartTLSServer(inf string, t *testing.T, middlewares ...brevx.Middleware) (
 	return mails, s, mocks.RootCAPool(rootCert)
 }
 
-func StartServer(inf string) (<-chan *envelope.Envelope, *brevx.Server) {
+func StartServer(inf string) (<-chan *envelope.Envelope, *smtpx.Server) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	mails := make(chan *envelope.Envelope, 10)
-	s := &brevx.Server{
+	s := &smtpx.Server{
 		Logger: logger,
 		Addr:   inf,
-		Handler: brevx.HandlerOf(func(e *envelope.Envelope) brevx.Response {
+		Handler: smtpx.NewHandler(func(e *envelope.Envelope) smtpx.Response {
 			mails <- e
-			return brevx.NewResponse(250, "OK")
+			return smtpx.NewResponse(250, "OK")
 		}),
 	}
 
@@ -171,10 +171,10 @@ func TestTLS(t *testing.T) {
 func TestStartStop(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	s := &brevx.Server{
+	s := &smtpx.Server{
 		Logger: logger,
-		Handler: brevx.HandlerOf(func(e *envelope.Envelope) brevx.Response {
-			return brevx.NewResponse(250, "OK")
+		Handler: smtpx.NewHandler(func(e *envelope.Envelope) smtpx.Response {
+			return smtpx.NewResponse(250, "OK")
 		}),
 	}
 
@@ -197,10 +197,10 @@ func TestStartStop(t *testing.T) {
 func TestStartStopTimout(t *testing.T) {
 	inf := ":2525"
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	s := brevx.Server{
+	s := smtpx.Server{
 		Logger: logger,
-		Handler: brevx.HandlerOf(func(e *envelope.Envelope) brevx.Response {
-			return brevx.NewResponse(250, "OK")
+		Handler: smtpx.NewHandler(func(e *envelope.Envelope) smtpx.Response {
+			return smtpx.NewResponse(250, "OK")
 		}),
 		Addr: inf,
 	}
@@ -245,11 +245,11 @@ func TestSendEmail(t *testing.T) {
 
 	envelopes := make(chan *envelope.Envelope, 1)
 
-	s := brevx.Server{
+	s := smtpx.Server{
 		Logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		Handler: brevx.HandlerOf(func(e *envelope.Envelope) brevx.Response {
+		Handler: smtpx.NewHandler(func(e *envelope.Envelope) smtpx.Response {
 			envelopes <- e
-			return brevx.NewResponse(250, "OK")
+			return smtpx.NewResponse(250, "OK")
 		}),
 		Addr: ":2525",
 	}
@@ -639,9 +639,9 @@ func TestMiddlewareReceivedHeader(t *testing.T) {
 func TestMiddlewareOrder(t *testing.T) {
 
 	var res []string
-	adder := func(i int) brevx.Middleware {
-		return func(next brevx.HandlerFunc) brevx.HandlerFunc {
-			return func(e *envelope.Envelope) brevx.Response {
+	adder := func(i int) smtpx.Middleware {
+		return func(next smtpx.HandlerFunc) smtpx.HandlerFunc {
+			return func(e *envelope.Envelope) smtpx.Response {
 				res = append(res, fmt.Sprintf("pre-%d", i))
 				defer func() { res = append(res, fmt.Sprintf("post-%d", i)) }()
 				return next(e)
@@ -649,10 +649,10 @@ func TestMiddlewareOrder(t *testing.T) {
 		}
 	}
 
-	stop := func(next brevx.HandlerFunc) brevx.HandlerFunc {
-		return func(e *envelope.Envelope) brevx.Response {
+	stop := func(next smtpx.HandlerFunc) smtpx.HandlerFunc {
+		return func(e *envelope.Envelope) smtpx.Response {
 			res = append(res, "stopped")
-			return brevx.NewResponse(550, "Stopped for no good reason")
+			return smtpx.NewResponse(550, "Stopped for no good reason")
 		}
 	}
 
@@ -664,7 +664,7 @@ func TestMiddlewareOrder(t *testing.T) {
 	//MIME encoded-word syntax (RFC 2047) to represent non-ASCII characters.
 	t.Run("Basic", func(t *testing.T) {
 		res = nil
-		server.Middlewares = append([]brevx.Middleware{}, adder(0), adder(1), adder(2))
+		server.Middlewares = append([]smtpx.Middleware{}, adder(0), adder(1), adder(2))
 		// Test cases
 		err := SendEmailCannedWithCA(certPool, server.Hostname, addr, "from@example.com",
 			[]string{"to@example.com"}, "Test Subject", "Test Body")
@@ -686,7 +686,7 @@ func TestMiddlewareOrder(t *testing.T) {
 
 	t.Run("Early_Return", func(t *testing.T) {
 		res = nil
-		server.Middlewares = append([]brevx.Middleware{}, adder(0), stop, adder(2))
+		server.Middlewares = append([]smtpx.Middleware{}, adder(0), stop, adder(2))
 
 		err := SendEmailCannedWithCA(certPool, server.Hostname, addr, "from@example.com",
 			[]string{"to@example.com"}, "Test Subject", "Test Body")

@@ -1,4 +1,4 @@
-module github.com/crholm/brevx
+module github.com/modfin/smtpx
 
 go 1.24
 

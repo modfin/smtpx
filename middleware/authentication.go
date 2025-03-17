@@ -4,12 +4,12 @@ import (
 	"blitiri.com.ar/go/spf"
 	"bytes"
 	"fmt"
-	"github.com/crholm/brevx"
-	"github.com/crholm/brevx/envelope"
-	"github.com/crholm/brevx/middleware/authres"
-	"github.com/crholm/brevx/middleware/authres/dkim"
-	"github.com/crholm/brevx/middleware/authres/dmarc"
-	"github.com/crholm/brevx/utils"
+	"github.com/modfin/smtpx"
+	"github.com/modfin/smtpx/envelope"
+	"github.com/modfin/smtpx/middleware/authres"
+	"github.com/modfin/smtpx/middleware/authres/dkim"
+	"github.com/modfin/smtpx/middleware/authres/dmarc"
+	"github.com/modfin/smtpx/utils"
 	"golang.org/x/net/publicsuffix"
 	"log/slog"
 	"net"
@@ -17,14 +17,14 @@ import (
 	"strings"
 )
 
-func AddAuthenticationResult(hostname string, logger *slog.Logger) brevx.Middleware {
+func AddAuthenticationResult(hostname string, logger *slog.Logger) smtpx.Middleware {
 	log := func(s string) {
 		if logger != nil {
 			logger.Debug(s)
 		}
 	}
-	return func(next brevx.HandlerFunc) brevx.HandlerFunc {
-		return func(e *envelope.Envelope) brevx.Response {
+	return func(next smtpx.HandlerFunc) smtpx.HandlerFunc {
+		return func(e *envelope.Envelope) smtpx.Response {
 
 			spfres := spfCheck(e)
 			dkims := dkimCheck(e)

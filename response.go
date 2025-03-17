@@ -1,4 +1,4 @@
-package brevx
+package smtpx
 
 import "fmt"
 
@@ -7,7 +7,7 @@ import "fmt"
 // connection, for example `250 OK: Message received`.
 type Response interface {
 	fmt.Stringer
-	Code() int
+	StatusCode() int
 	Class() int
 }
 
@@ -34,7 +34,7 @@ func (r result) String() string {
 	return fmt.Sprintf("%d %s: %s", r.code, clazz, r.str)
 }
 
-func (r result) Code() int {
+func (r result) StatusCode() int {
 	return r.code
 }
 func (r result) Class() int {

@@ -1,4 +1,4 @@
-package brevx
+package smtpx
 
 import (
 	"bufio"

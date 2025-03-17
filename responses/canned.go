@@ -1,6 +1,6 @@
 package responses
 
-// codeMap for mapping Enhanced Status Code to Basic Code
+// codeMap for mapping Enhanced Status StatusCode to Basic StatusCode
 // Mapping according to https://www.iana.org/assignments/smtp-enhanced-status-codes/smtp-enhanced-status-codes.xml
 // This might not be entirely useful
 
@@ -15,7 +15,7 @@ var FailNestedMailCmd = &response{
 	enhancedCode: InvalidCommand,
 	basicCode:    503,
 	class:        ClassPermanentFailure,
-	comment:      "Error: nested MAIL command",
+	comment:      "GetError: nested MAIL command",
 }
 
 var RejectedSenderMailCmd = &response{
@@ -66,7 +66,7 @@ var ErrorRelayDenied = &response{
 	enhancedCode: BadDestinationMailboxAddress,
 	basicCode:    454,
 	class:        ClassTransientFailure,
-	comment:      "Error: Relay access denied:",
+	comment:      "GetError: Relay access denied:",
 }
 
 var SuccessQuitCmd = &response{
@@ -80,14 +80,14 @@ var FailNoSenderDataCmd = &response{
 	enhancedCode: InvalidCommand,
 	basicCode:    503,
 	class:        ClassPermanentFailure,
-	comment:      "Error: No sender",
+	comment:      "GetError: No sender",
 }
 
 var FailNoRecipientsDataCmd = &response{
 	enhancedCode: InvalidCommand,
 	basicCode:    503,
 	class:        ClassPermanentFailure,
-	comment:      "Error: No recipients",
+	comment:      "GetError: No recipients",
 }
 
 var SuccessDataCmd = &response{
@@ -134,21 +134,21 @@ var FailReadLimitExceededDataCmd = &response{
 	enhancedCode: MessageLengthExceedsAdministrativeLimit,
 	basicCode:    550,
 	class:        ClassPermanentFailure,
-	comment:      "Error:",
+	comment:      "GetError:",
 }
 
 var FailMessageSizeExceeded = &response{
 	enhancedCode: OtherOrUndefinedNetworkOrRoutingStatus,
 	basicCode:    552,
 	class:        ClassPermanentFailure,
-	comment:      "Error:",
+	comment:      "GetError:",
 }
 
 var FailReadErrorDataCmd = &response{
 	enhancedCode: OtherOrUndefinedMailSystemStatus,
 	basicCode:    451,
 	class:        ClassTransientFailure,
-	comment:      "Error:",
+	comment:      "GetError:",
 }
 
 var FailPathTooLong = &response{
@@ -197,7 +197,7 @@ var FailBackendTransaction = &response{
 	enhancedCode: OtherOrUndefinedProtocolStatus,
 	basicCode:    554,
 	class:        ClassPermanentFailure,
-	comment:      "Error:",
+	comment:      "GetError:",
 }
 
 var SuccessMessageQueued = &response{
@@ -218,7 +218,7 @@ var FailBackendTimeout = &response{
 	enhancedCode: OtherOrUndefinedProtocolStatus,
 	basicCode:    554,
 	class:        ClassPermanentFailure,
-	comment:      "Error: transaction timeout",
+	comment:      "GetError: transaction timeout",
 }
 
 var FailRcptCmd = &response{

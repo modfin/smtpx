@@ -2,23 +2,23 @@ package middleware
 
 import (
 	"fmt"
-	"github.com/crholm/brevx"
-	"github.com/crholm/brevx/envelope"
-	"github.com/crholm/brevx/utils"
+	"github.com/modfin/smtpx"
+	"github.com/modfin/smtpx/envelope"
+	"github.com/modfin/smtpx/utils"
 	"strings"
 	"time"
 )
 
-func AddReturnPath(next brevx.HandlerFunc) brevx.HandlerFunc {
-	return func(e *envelope.Envelope) brevx.Response {
+func AddReturnPath(next smtpx.HandlerFunc) smtpx.HandlerFunc {
+	return func(e *envelope.Envelope) smtpx.Response {
 		_ = e.PrependHeader("Return-Path", fmt.Sprintf("<%s>", e.MailFrom.Address))
 		return next(e)
 	}
 }
 
-func AddDeliveredHeaders() brevx.Middleware {
-	return func(next brevx.HandlerFunc) brevx.HandlerFunc {
-		return func(e *envelope.Envelope) brevx.Response {
+func AddDeliveredHeaders() smtpx.Middleware {
+	return func(next smtpx.HandlerFunc) smtpx.HandlerFunc {
+		return func(e *envelope.Envelope) smtpx.Response {
 			if len(e.RcptTo) == 1 {
 				_ = e.PrependHeader("Delivered-To", e.RcptTo[0].Address)
 			}
@@ -27,9 +27,9 @@ func AddDeliveredHeaders() brevx.Middleware {
 	}
 }
 
-func AddReceivedHeaders(hostname string) brevx.Middleware {
-	return func(next brevx.HandlerFunc) brevx.HandlerFunc {
-		return func(e *envelope.Envelope) brevx.Response {
+func AddReceivedHeaders(hostname string) smtpx.Middleware {
+	return func(next smtpx.HandlerFunc) smtpx.HandlerFunc {
+		return func(e *envelope.Envelope) smtpx.Response {
 
 			protocol := "SMTP"
 			if e.ESMTP {
@@ -61,20 +61,20 @@ func AddReceivedHeaders(hostname string) brevx.Middleware {
 
 // RecipientDomainsWhitelist Check if the recipient domain, extracted from "RCPT TO" command, is in the whitelist
 // Example usage: server.Use(middleware.RecipientDomainsWhitelist("example.com", "other-domain.com"))
-func FilterRecipientDomains(domain ...string) brevx.Middleware {
+func FilterRecipientDomains(domain ...string) smtpx.Middleware {
 	var set = map[string]bool{}
 	for _, d := range domain {
 		set[strings.ToLower(d)] = true
 	}
-	return func(next brevx.HandlerFunc) brevx.HandlerFunc {
-		return func(e *envelope.Envelope) brevx.Response {
+	return func(next smtpx.HandlerFunc) smtpx.HandlerFunc {
+		return func(e *envelope.Envelope) smtpx.Response {
 			for _, r := range e.RcptTo {
 				domain := strings.ToLower(utils.DomainOfEmail(r))
 				if set[domain] {
 					return next(e)
 				}
 			}
-			return brevx.NewResponse(550, "Recipient domain not allowed")
+			return smtpx.NewResponse(550, "Recipient domain not allowed")
 		}
 	}
 }
@@ -84,20 +84,20 @@ func FilterRecipientDomains(domain ...string) brevx.Middleware {
 // if any domain in RCPT TO is in whitelist the middleware will continue
 // if no domain in RCPT TO is in whitelist the middleware will return stats code 550
 // envelope.Envelope.RcptTo is not filtered and will contain all that was recviced in RCPT TO
-func RecipientDomainsWhitelist(domain ...string) brevx.Middleware {
+func RecipientDomainsWhitelist(domain ...string) smtpx.Middleware {
 	var set = map[string]bool{}
 	for _, d := range domain {
 		set[strings.ToLower(d)] = true
 	}
-	return func(next brevx.HandlerFunc) brevx.HandlerFunc {
-		return func(e *envelope.Envelope) brevx.Response {
+	return func(next smtpx.HandlerFunc) smtpx.HandlerFunc {
+		return func(e *envelope.Envelope) smtpx.Response {
 			for _, r := range e.RcptTo {
 				domain := strings.ToLower(utils.DomainOfEmail(r))
 				if set[domain] {
 					return next(e)
 				}
 			}
-			return brevx.NewResponse(550, "Recipient domain not allowed")
+			return smtpx.NewResponse(550, "Recipient domain not allowed")
 		}
 	}
 }
@@ -105,18 +105,18 @@ func RecipientDomainsWhitelist(domain ...string) brevx.Middleware {
 // SenderDomainsWhitelist Check if the sender domain, extracted from "MAIL FROM" command is in the whitelist
 // example usage: server.Use(middleware.SenderDomainsWhitelist("example.com", "other-domain.com"))
 // if domain is not in the whitelist, the middleware will stop and return stats code 550 to email client
-func SenderDomainsWhitelist(domain ...string) brevx.Middleware {
+func SenderDomainsWhitelist(domain ...string) smtpx.Middleware {
 
 	var set = map[string]bool{}
 	for _, d := range domain {
 		set[strings.ToLower(d)] = true
 	}
 
-	return func(next brevx.HandlerFunc) brevx.HandlerFunc {
-		return func(e *envelope.Envelope) brevx.Response {
+	return func(next smtpx.HandlerFunc) smtpx.HandlerFunc {
+		return func(e *envelope.Envelope) smtpx.Response {
 			domain := strings.ToLower(utils.DomainOfEmail(e.MailFrom))
 			if !set[domain] {
-				return brevx.NewResponse(550, "Sender domain not allowed")
+				return smtpx.NewResponse(550, "Sender domain not allowed")
 			}
 
 			return next(e)

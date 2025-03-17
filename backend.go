@@ -1,7 +1,7 @@
-package brevx
+package smtpx
 
 import (
-	"github.com/crholm/brevx/envelope"
+	"github.com/modfin/smtpx/envelope"
 )
 
 type Middleware func(next HandlerFunc) HandlerFunc
@@ -18,7 +18,7 @@ type Handler interface {
 	Data(*envelope.Envelope) Response
 }
 
-func HandlerOf(handler HandlerFunc) Handler {
+func NewHandler(handler HandlerFunc) Handler {
 	return dataFunc(handler)
 }
 
@@ -30,6 +30,6 @@ func (f dataFunc) Data(e *envelope.Envelope) Response {
 	return f(e)
 }
 
-var NoopBackend Handler = HandlerOf(func(e *envelope.Envelope) Response {
+var NoopBackend Handler = NewHandler(func(e *envelope.Envelope) Response {
 	return nil
 })

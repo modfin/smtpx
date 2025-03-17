@@ -34,9 +34,6 @@ func (e *Mail) Headers() (textproto.MIMEHeader, error) {
 	dec := &mime.WordDecoder{
 		CharsetReader: charsetReader,
 	}
-	// TODO someting to add all charsets in how we parse headers...
-	// dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
-	// using stuff from golang.org/x/text/encoding/charmap
 
 	// decode all headers
 	for k, vv := range h {
