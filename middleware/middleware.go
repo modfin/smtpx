@@ -59,7 +59,7 @@ func AddReceivedHeaders(hostname string) smtpx.Middleware {
 	}
 }
 
-// RecipientDomainsWhitelist Check if the recipient domain, extracted from "RCPT TO" command, is in the whitelist
+// FilterRecipientDomains Check if the recipient domain, extracted from "RCPT TO" command, is in the whitelist
 // Example usage: server.Use(middleware.RecipientDomainsWhitelist("example.com", "other-domain.com"))
 func FilterRecipientDomains(domain ...string) smtpx.Middleware {
 	var set = map[string]bool{}
@@ -68,6 +68,10 @@ func FilterRecipientDomains(domain ...string) smtpx.Middleware {
 	}
 	return func(next smtpx.HandlerFunc) smtpx.HandlerFunc {
 		return func(e *envelope.Envelope) smtpx.Response {
+			if len(set) == 0 {
+				return next(e)
+			}
+
 			for _, r := range e.RcptTo {
 				domain := strings.ToLower(utils.DomainOfEmail(r))
 				if set[domain] {
@@ -91,6 +95,9 @@ func RecipientDomainsWhitelist(domain ...string) smtpx.Middleware {
 	}
 	return func(next smtpx.HandlerFunc) smtpx.HandlerFunc {
 		return func(e *envelope.Envelope) smtpx.Response {
+			if len(set) == 0 {
+				return next(e)
+			}
 			for _, r := range e.RcptTo {
 				domain := strings.ToLower(utils.DomainOfEmail(r))
 				if set[domain] {
@@ -114,6 +121,9 @@ func SenderDomainsWhitelist(domain ...string) smtpx.Middleware {
 
 	return func(next smtpx.HandlerFunc) smtpx.HandlerFunc {
 		return func(e *envelope.Envelope) smtpx.Response {
+			if len(set) == 0 {
+				return next(e)
+			}
 			domain := strings.ToLower(utils.DomainOfEmail(e.MailFrom))
 			if !set[domain] {
 				return smtpx.NewResponse(550, "Sender domain not allowed")
