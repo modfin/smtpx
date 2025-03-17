@@ -1,14 +1,11 @@
 package brevx
 
 import (
-	"bufio"
 	"crypto/tls"
 	"fmt"
 	"github.com/crholm/brevx/envelope"
-	"io"
 	"log/slog"
 	"net"
-	"net/textproto"
 	"sync"
 	"time"
 )
@@ -29,6 +26,9 @@ const (
 	ConnShutdown
 )
 
+const CharsetDefault = "default"
+const CharsetUtf8 = "SMTPUTF8"
+
 type connection struct {
 	*envelope.Envelope
 
@@ -38,40 +38,34 @@ type connection struct {
 	KilledAt    time.Time
 
 	// Number of errors encountered during session with this connection
-	errors       int
-	state        ClientState
+	errors  int
+	state   ClientState
+	charset string
+
 	messagesSent int
 
 	bufErr error
 
-	in *textproto.Reader
-	//out     *bufio.Writer
-	// guards access to conn
+	in *smtpReader
+
 	connGuard sync.Mutex
 	conn      net.Conn
 
 	log *slog.Logger
 }
 
-func (c *connection) resetIn() {
-	inLimit := io.LimitReader(c.conn, defaultMaxSize)
-	inBuf := bufio.NewReader(inLimit)
-	c.in = textproto.NewReader(inBuf)
-}
-
 // newConnection allocates a new connection.
-func newConnection(conn net.Conn, clientID uint64, logger *slog.Logger) *connection {
+func newConnection(conn net.Conn, maxMessageSize int64, connectionId uint64, logger *slog.Logger) *connection {
 
 	c := &connection{
 		conn: conn,
 
-		Envelope:    envelope.NewEnvelope(conn.RemoteAddr(), clientID),
+		Envelope:    envelope.NewEnvelope(conn.RemoteAddr(), connectionId),
 		ConnectedAt: time.Now(),
-
-		log: logger.With("id", clientID, "ip", conn.RemoteAddr()),
+		charset:     CharsetDefault,
+		in:          NewSMTPReader(conn, maxMessageSize),
+		log:         logger.With("id", connectionId, "ip", conn.RemoteAddr()),
 	}
-	c.resetIn()
-
 	return c
 }
 
@@ -82,6 +76,7 @@ const commandSuffix = "\r\n"
 func (conn *connection) readCommand() (string, error) {
 	//var input string
 	// In command state, stop reading at line breaks
+	// TODO, maybe enforce max len of line ( a smaller number then maxMessageSize)
 	cmd, err := conn.in.ReadLine()
 	if err != nil {
 		return "", err
@@ -125,10 +120,10 @@ func (c *connection) sendResponse(r ...interface{}) {
 // -End of DATA command
 // TLS handshake
 func (c *connection) resetTransaction() {
-	c.Envelope = envelope.NewEnvelope(c.RemoteAddr, c.ClientId())
+	c.Envelope = envelope.NewEnvelope(c.RemoteAddr, c.ConnectionId())
+
 	// to have a fresh limit
-	// TODO test and veriy this
-	c.resetIn()
+	c.in.ResetLimit()
 }
 
 // isInTransaction returns true if the connection is inside a transaction.
@@ -178,38 +173,7 @@ func (c *connection) upgradeTLS(tlsConfig *tls.Config) error {
 	// convert tlsConn to net.Conn
 	c.conn = net.Conn(tlsConn)
 
-	c.in = textproto.NewReader(bufio.NewReader(c.conn))
+	c.in = NewSMTPReader(c.conn, c.in.Limit())
 	c.TLS = true
 	return err
 }
-
-//type pathParser func([]byte) error
-//
-//func (c *connection) parsePath(in []byte, p pathParser) (envelope.Address, error) {
-//	address := envelope.Address{}
-//	var err error
-//	if len(in) > rfc5321.LimitPath {
-//		return address, errors.New(response.FailPathTooLong.String())
-//	}
-//	if err = p(in); err != nil {
-//		return address, errors.New(response.FailInvalidAddress.String())
-//	} else if c.parser.NullPath {
-//		// bounce has empty from address
-//		address = envelope.Address{}
-//	} else if len(c.parser.LocalPart) > rfc5321.LimitLocalPart {
-//		err = errors.New(response.FailLocalPartTooLong.String())
-//	} else if len(c.parser.Domain) > rfc5321.LimitDomain {
-//		err = errors.New(response.FailDomainTooLong.String())
-//	} else {
-//		address = envelope.Address{
-//			User:       c.parser.LocalPart,
-//			Host:       c.parser.Domain,
-//			ADL:        c.parser.ADL,
-//			PathParams: c.parser.PathParams,
-//			NullPath:   c.parser.NullPath,
-//			Quoted:     c.parser.LocalPartQuotes,
-//			IP:         c.parser.IP,
-//		}
-//	}
-//	return address, err
-//}

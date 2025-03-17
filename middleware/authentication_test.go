@@ -1,9 +1,10 @@
 package middleware
 
 import (
-	"fmt"
 	"github.com/crholm/brevx"
 	"github.com/crholm/brevx/envelope"
+	"github.com/crholm/brevx/middleware/authres"
+	"log/slog"
 	"net"
 	"net/mail"
 	"strings"
@@ -29,7 +30,8 @@ func TestAddAuthenticationResult(t *testing.T) {
 	}
 
 	// Create the middleware
-	middleware := AddAuthenticationResult("example.com")
+	slog.SetLogLoggerLevel(slog.LevelDebug)
+	middleware := AddAuthenticationResult("example.com", slog.Default())
 
 	// Apply the middleware to our next handler
 	handler := middleware(nextHandler)
@@ -42,12 +44,16 @@ func TestAddAuthenticationResult(t *testing.T) {
 		t.Errorf("Expected response {250 OK}, got %v", resp)
 	}
 
-	fmt.Println(e.Data.String())
 	// Check that the Authentication-Results header was added
-	header, err := e.Headers()
+	m, err := e.Mail()
+	if err != nil {
+		t.Errorf("Expected envelope to be a mail message, got %v", err)
+	}
+	header, err := m.Headers()
 	if err != nil {
 		t.Errorf("Expected Authentication-Result header to be added, but it wasn't")
 	}
+
 	headerVal := header.Get("Authentication-Results")
 	// Verify the header contains the hostname
 	if !strings.Contains(headerVal, "example.com") {
@@ -57,5 +63,16 @@ func TestAddAuthenticationResult(t *testing.T) {
 	// Verify the header contains SPF results
 	if !strings.Contains(headerVal, "spf=") {
 		t.Errorf("Expected Authentication-Result to contain SPF results, got %s", headerVal)
+	}
+
+	id, res, err := authres.Parse(headerVal)
+	if err != nil {
+		t.Errorf("Expected no error when parsing header, got: %v", err)
+	}
+	if id != "example.com" {
+		t.Errorf("Expected identifier to be %q, but got %q", "example.com", id)
+	}
+	if len(res) != 2 {
+		t.Errorf("Expected number of results to be %v, but got %v", 2, len(res))
 	}
 }

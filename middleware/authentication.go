@@ -11,12 +11,18 @@ import (
 	"github.com/crholm/brevx/middleware/authres/dmarc"
 	"github.com/crholm/brevx/utils"
 	"golang.org/x/net/publicsuffix"
+	"log/slog"
 	"net"
 	"net/mail"
 	"strings"
 )
 
-func AddAuthenticationResult(hostname string) brevx.Middleware {
+func AddAuthenticationResult(hostname string, logger *slog.Logger) brevx.Middleware {
+	log := func(s string) {
+		if logger != nil {
+			logger.Debug(s)
+		}
+	}
 	return func(next brevx.HandlerFunc) brevx.HandlerFunc {
 		return func(e *envelope.Envelope) brevx.Response {
 
@@ -30,7 +36,9 @@ func AddAuthenticationResult(hostname string) brevx.Middleware {
 			}
 
 			val := authres.Format(hostname, res)
-			_ = e.AddHeader("Authentication-Result", val)
+			_ = e.PrependHeader("Authentication-Results", val)
+
+			log("Authentication-Results: " + val)
 
 			return next(e)
 		}
@@ -40,119 +48,167 @@ func AddAuthenticationResult(hostname string) brevx.Middleware {
 func dmarcCheck(e *envelope.Envelope, spf *authres.SPFResult, dkims []*authres.DKIMResult) *authres.DMARCResult {
 	domain := utils.DomainOfEmail(e.MailFrom)
 
-	var errResult = func(reason string) *authres.DMARCResult {
+	// Helper function for error cases
+	createErrorResult := func(reason string) *authres.DMARCResult {
 		return &authres.DMARCResult{
 			Value:  authres.ResultNone,
 			Reason: reason,
 			From:   domain,
 		}
 	}
-	headers, err := e.Headers()
+
+	m, err := e.Mail()
+	if err != nil {
+		return createErrorResult("unable to get mail")
+	}
+	// Get headers
+	headers, err := m.Headers()
 	if err != nil {
 		fmt.Println(err)
-		return errResult("Unable to get headers")
+		return createErrorResult("unable to get headers")
 	}
 
+	// Parse From header
 	fromHeader := headers.Get("From")
 	from, err := mail.ParseAddress(fromHeader)
-
 	if err != nil || len(fromHeader) == 0 {
-		return errResult("No From header")
+		return createErrorResult("uo From header")
 	}
 	fromDomain := utils.DomainOfEmail(from)
 
-	r, err := dmarc.Lookup(fromDomain)
-
+	// Lookup DMARC record
+	dmarcRecord, err := dmarc.Lookup(fromDomain)
 	if err != nil {
-		return errResult("DMARC lookup failed")
+		return createErrorResult("DMARC lookup failed")
 	}
 
-	var val authres.ResultValue = authres.ResultFail
-	reasons := []string{}
-
-	spfAligned := false
-	dkimAligned := false
-
+	// Parse SPF domain
 	spfFrom, err := mail.ParseAddress(spf.From)
 	if err != nil {
-		return errResult("Unable to parse spf from")
+		return createErrorResult("Unable to parse spf from")
 	}
 	spfDomain := utils.DomainOfEmail(spfFrom)
 
-	if spf.Value == authres.ResultPass {
-		if r.SPFAlignment == dmarc.AlignmentStrict && spfDomain == fromDomain {
-			spfAligned = true
-		}
-		if r.SPFAlignment == dmarc.AlignmentRelaxed {
+	// Check SPF alignment
+	spfAligned := checkSPFAlignment(spf, dmarcRecord, spfDomain, fromDomain)
 
-			if strings.HasSuffix(spfDomain, fromDomain) {
-				spfAligned = true
-			}
-			spfOrgDomain, err := publicsuffix.EffectiveTLDPlusOne(spfDomain)
+	// Check DKIM alignment
+	dkimAligned := checkDKIMAlignment(dkims, dmarcRecord, fromDomain)
+
+	// Determine DMARC result
+	result := determineDMARCResult(spfAligned, dkimAligned, spf, dmarcRecord)
+	result.From = domain
+
+	return result
+}
+
+// Check if SPF is aligned according to DMARC policy
+func checkSPFAlignment(spf *authres.SPFResult, r *dmarc.Record, spfDomain, fromDomain string) bool {
+	// If SPF didn't pass, it can't be aligned
+	if spf.Value != authres.ResultPass {
+		return false
+	}
+
+	// Strict alignment - domains must exactly match
+	if r.SPFAlignment == dmarc.AlignmentStrict {
+		return spfDomain == fromDomain
+	}
+
+	// Relaxed alignment - check for suffix or organizational domain match
+	if r.SPFAlignment == dmarc.AlignmentRelaxed {
+		// Check if spfDomain is a subdomain of fromDomain
+		if strings.HasSuffix(spfDomain, fromDomain) {
+			return true
+		}
+
+		// Check organizational domain match
+		spfOrgDomain, err := publicsuffix.EffectiveTLDPlusOne(spfDomain)
+		if err != nil {
+			return false
+		}
+
+		fromOrgDomain, err := publicsuffix.EffectiveTLDPlusOne(fromDomain)
+		if err != nil {
+			return false
+		}
+
+		return spfOrgDomain == fromOrgDomain
+	}
+
+	return false
+}
+
+// Check if any DKIM signature is aligned according to DMARC policy
+func checkDKIMAlignment(dkims []*authres.DKIMResult, r *dmarc.Record, fromDomain string) bool {
+	if dkims == nil {
+		return false
+	}
+
+	for _, dkim := range dkims {
+		// DKIM must pass to be considered for alignment
+		if dkim.Value != authres.ResultPass {
+			continue
+		}
+
+		// Strict alignment - domains must exactly match
+		if r.DKIMAlignment == dmarc.AlignmentStrict && dkim.Domain == fromDomain {
+			return true
+		}
+
+		// Relaxed alignment - check organizational domain match
+		if r.DKIMAlignment == dmarc.AlignmentRelaxed {
+			dkimOrgDomain, err := publicsuffix.EffectiveTLDPlusOne(dkim.Domain)
 			if err != nil {
-				return errResult("Unable to get spf org domain")
+				continue
 			}
+
 			fromOrgDomain, err := publicsuffix.EffectiveTLDPlusOne(fromDomain)
 			if err != nil {
-				return errResult("Unable to get from org domain")
-			}
-			if spfOrgDomain == fromOrgDomain {
-				spfAligned = true
+				continue
 			}
 
-		}
-	}
-
-	if dkims != nil {
-		for _, dkim := range dkims {
-			if dkim.Value == authres.ResultPass {
-				if r.DKIMAlignment == dmarc.AlignmentStrict && dkim.Domain == fromDomain {
-					dkimAligned = true
-					break // Found a passing, aligned DKIM signature
-				}
-				if r.DKIMAlignment == dmarc.AlignmentRelaxed {
-					dkimOrgDomain, err := publicsuffix.EffectiveTLDPlusOne(dkim.Domain)
-					if err != nil {
-						return errResult("Unable to get dkim org domain")
-					}
-					fromOrgDomain, err := publicsuffix.EffectiveTLDPlusOne(fromDomain)
-					if err != nil {
-						return errResult("Unable to get from org domain")
-					}
-					if dkimOrgDomain == fromOrgDomain {
-						dkimAligned = true
-						break // Found a passing, aligned DKIM signature
-					}
-				}
+			if dkimOrgDomain == fromOrgDomain {
+				return true
 			}
 		}
 	}
 
+	return false
+}
+
+// Determine the final DMARC result based on alignment results and policy
+func determineDMARCResult(spfAligned, dkimAligned bool, spf *authres.SPFResult, r *dmarc.Record) *authres.DMARCResult {
+	var value authres.ResultValue
+	var reasons []string
+
+	// If either SPF or DKIM is aligned, DMARC passes
 	if spfAligned || dkimAligned {
-		val = authres.ResultPass
-	}
+		value = authres.ResultPass
+		reasons = []string{"DMARC check passed"}
+	} else {
+		value = authres.ResultFail
+		reasons = []string{"DMARC check failed"}
 
-	if val != authres.ResultFail {
-		reasons = append(reasons, "DMARC check failed")
+		// Add specific failure reasons
 		if spf == nil || spf.Value != authres.ResultPass {
 			reasons = append(reasons, fmt.Sprintf("SPF failed or not aligned: %s", spf.Reason))
 		}
+
 		if !dkimAligned {
 			reasons = append(reasons, "DKIM failed or not aligned")
 		}
 	}
 
+	// Override if policy is "none"
 	if r.Policy == dmarc.PolicyNone {
-		val = authres.ResultNone
+		value = authres.ResultNone
 		reasons = []string{"DMARC policy is none"}
 	}
 
-	res := &authres.DMARCResult{
-		Value:  val,
+	return &authres.DMARCResult{
+		Value:  value,
 		Reason: strings.Join(reasons, ", "),
-		From:   domain,
 	}
-	return res
 }
 
 func dkimCheck(e *envelope.Envelope) []*authres.DKIMResult {

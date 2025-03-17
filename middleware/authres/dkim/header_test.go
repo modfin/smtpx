@@ -70,10 +70,10 @@ func TestLongHeaderFolding(t *testing.T) {
 		"v": "1",
 		"a": "rsa-sha256",
 		"d": "example.org",
-		"h": "From:To:Subject:Date:Message-ID:Long-Header-Name",
+		"h": "From:To:Subject:Date:Message-ID:Long-Headers-Name",
 	}
 
-	expected := "DKIM-Signature: a=rsa-sha256; d=example.org;\r\n h=From:To:Subject:Date:Message-ID:Long-Header-Name; v=1;"
+	expected := "DKIM-Signature: a=rsa-sha256; d=example.org;\r\n h=From:To:Subject:Date:Message-ID:Long-Headers-Name; v=1;"
 
 	s := formatHeaderParams("DKIM-Signature", params)
 	if s != expected {
@@ -82,7 +82,7 @@ func TestLongHeaderFolding(t *testing.T) {
 }
 
 func TestSignedHeaderFolding(t *testing.T) {
-	hValue := "From:To:Subject:Date:Message-ID:Long-Header-Name:Another-Long-Header-Name"
+	hValue := "From:To:Subject:Date:Message-ID:Long-Headers-Name:Another-Long-Headers-Name"
 
 	params := map[string]string{
 		"v": "1",

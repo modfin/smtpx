@@ -450,11 +450,15 @@ func TestSMTPServer(t *testing.T) {
 
 	// Test cases
 	t.Run("Basic Email Sending", func(t *testing.T) {
-		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+		err := SendEmailCannedWithCA(certPool, host, addr, "from@example.com",
 			[]string{"to@example.com"}, "Test Subject", "Test Body")
 		require.NoError(t, err, "Should send email successfully")
-		m := <-inbox
-		require.Equal(t, "from@example.com", m.MailFrom.Address)
+		e := <-inbox
+		require.Equal(t, "from@example.com", e.MailFrom.Address)
+
+		m, err := e.Mail()
+		require.NoError(t, err)
+
 		p, err := m.Headers()
 		require.NoError(t, err)
 		require.Equal(t, "Test Subject", p.Get("Subject"))
@@ -462,7 +466,7 @@ func TestSMTPServer(t *testing.T) {
 
 	t.Run("Invalid Sender", func(t *testing.T) {
 		// Test with invalid sender format
-		err := SendEmailWithCustomCA(certPool, host, addr, "not-an-email",
+		err := SendEmailCannedWithCA(certPool, host, addr, "not-an-email",
 			[]string{"to@example.com"}, "Test Subject", "Test Body")
 
 		require.Error(t, err, "Should reject invalid sender format")
@@ -470,7 +474,7 @@ func TestSMTPServer(t *testing.T) {
 
 	t.Run("Invalid Recipient", func(t *testing.T) {
 		// Test with invalid recipient format
-		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+		err := SendEmailCannedWithCA(certPool, host, addr, "from@example.com",
 			[]string{"not-an-email"}, "Test Subject", "Test Body")
 
 		require.Error(t, err, "Should reject invalid recipient format")
@@ -478,7 +482,7 @@ func TestSMTPServer(t *testing.T) {
 
 	t.Run("Multiple Recipients", func(t *testing.T) {
 		// Test sending to multiple recipients
-		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+		err := SendEmailCannedWithCA(certPool, host, addr, "from@example.com",
 			[]string{"to1@example.com", "to2@example.com"},
 			"Test Subject", "Test Body")
 
@@ -489,81 +493,91 @@ func TestSMTPServer(t *testing.T) {
 	t.Run("Large Message Body", func(t *testing.T) {
 		// Generate a large message body (1MB)
 		// 32byte * 32 * 1024 = 1MB
-		largeBody := strings.Repeat("Lorem ipsum dolor sit amet dore ", 32*1_024*1)
-		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+		largeBody := strings.Repeat("Lorem ipsum dolor sit amet dore ", 32*1_024*9)
+
+		err := SendEmailCannedWithCA(certPool, host, addr, "from@example.com",
 			[]string{"to1@example.com"}, "Large Email", largeBody)
 		require.NoError(t, err, "Should handle large message bodies")
-		m := <-inbox
-		body, err := m.Body()
+		e := <-inbox
+		m, err := e.Mail()
+		require.NoError(t, err)
 
+		body := m.RawBody
 		require.NoError(t, err)
 		require.Equal(t, strings.TrimSpace(largeBody), strings.TrimSpace(string(body)))
+	})
 
+	t.Run("Large Message Body reset", func(t *testing.T) {
 		// Generate a large message body (1MB)
 		// 32byte * 32 * 1024 = 1MB
-		toLargeBody := strings.Repeat("Lorem ipsum dolor sit amet dore ", 32*1_024*20)
-		err = SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+		largeBody := strings.Repeat("Lorem ipsum dolor sit amet dore ", 32*1_024*9)
+
+		msg := fmt.Sprintf("From: %s\r\n"+
+			"To: %s\r\n"+
+			"Subject: %s\r\n"+
+			"MIME-Version: 1.0\r\n"+
+			"Content-Type: text/plain; charset=UTF-8\r\n"+
+			"\r\n"+
+			"%s", "from@example.com", "to@example.com", "subject", largeBody)
+
+		tlsConfig := &tls.Config{
+			RootCAs:    certPool,
+			ServerName: host,
+		}
+
+		// Connect to the SMTP server (without TLS initially)
+		c, err := smtp.Dial(addr)
+		require.NoError(t, err, "Should connect to SMTP server successfully")
+		defer c.Close()
+
+		// Check if the server supports STARTTLS
+		if ok, _ := c.Extension("STARTTLS"); ok {
+			err = c.StartTLS(tlsConfig)
+			require.NoError(t, err, "Should start TLS successfully")
+		}
+
+		for i := 0; i < 5; i++ {
+			t.Log("Sending email:", i)
+			err = c.Reset()
+			require.NoError(t, err, "Should reset connection successfully")
+
+			err = c.Mail("from@example.com")
+			require.NoError(t, err, "Should set mail successfully")
+
+			err = c.Rcpt("to@example.com")
+			require.NoError(t, err, "Should set recipient successfully")
+
+			w, err := c.Data()
+			require.NoError(t, err, "Should set data successfully")
+
+			_, err = w.Write([]byte(msg))
+			require.NoError(t, err, "Should write data successfully")
+
+			t.Log("Sent email successfully")
+
+			err = w.Close()
+			require.NoError(t, err, "Should close data successfully")
+			t.Log("Closed data successfully")
+
+			e := <-inbox
+			t.Log("Received email successfully")
+
+			m, err := e.Mail()
+			require.NoError(t, err)
+
+			body := m.RawBody
+			require.Equal(t, strings.TrimSpace(largeBody), strings.TrimSpace(string(body)))
+		}
+
+	})
+
+	t.Run("To Large Message Body", func(t *testing.T) {
+
+		toLargeBody := strings.Repeat("Lorem ipsum dolor sit amet dore ", 32*1_024*20) // 20MB
+		err := SendEmailCannedWithCA(certPool, host, addr, "from@example.com",
 			[]string{"to1@example.com"}, "Large Email", toLargeBody)
 		require.Error(t, err, "Should not handle to large body")
 	})
-
-	//t.Run("With Attachments", func(t *testing.T) {
-	//	// Test sending an email with attachments
-	//	attachments := []Attachment{
-	//		{
-	//			Filename: "test.txt",
-	//			Data:     []byte("This is a test file content"),
-	//			MimeType: "text/plain",
-	//		},
-	//		{
-	//			Filename: "image.png",
-	//			Data:     generateTestImage(),
-	//			MimeType: "image/png",
-	//		},
-	//	}
-	//	err := SendEmailWithAttachments(rootCert, host, port, "user", "pass", "from@example.com",
-	//		"to@example.com", "Email with Attachments", "Please see attachments",
-	//		attachments)
-	//	require.NoError(t, err, "Should handle email with attachments")
-	//})
-	//
-	//t.Run("Connection Timeout", func(t *testing.T) {
-	//	// Test with a very short timeout
-	//	err := SendEmailWithTimeout(rootCert, "10.255.255.1", 25, 100*time.Millisecond, "user", "pass",
-	//		"from@example.com", "to@example.com", "Test Subject", "Test Body")
-	//	require.Error(t, err, "Should timeout on connection")
-	//	require.Contains(t, err.Error(), "timeout", "Error should mention timeout")
-	//})
-	//
-	//t.Run("Invalid Server Certificate", func(t *testing.T) {
-	//	// Generate a different CA that the client doesn't trust
-	//	untrustedCert, untrustedKey, _ := GenerateRootCA()
-	//	err := SendEmailWithCustomCA(untrustedCert, host, port, "user", "pass", "from@example.com",
-	//		"to@example.com", "Test Subject", "Test Body")
-	//	require.Error(t, err, "Should reject untrusted server certificate")
-	//	require.Contains(t, err.Error(), "certificate", "Error should mention certificate")
-	//})
-	//
-	//t.Run("Server Disconnects", func(t *testing.T) {
-	//	// Create a server that disconnects after accepting the connection
-	//	disconnectingServer := setupDisconnectingServer(t)
-	//	defer disconnectingServer.Close()
-	//
-	//	serverAddr := disconnectingServer.Addr().String()
-	//	host, portStr, _ := net.SplitHostPort(serverAddr)
-	//	port, _ := strconv.Atoi(portStr)
-	//
-	//	err := SendEmailWithCustomCA(rootCert, host, port, "user", "pass", "from@example.com",
-	//		"to@example.com", "Test Subject", "Test Body")
-	//	require.Error(t, err, "Should handle server disconnection")
-	//})
-	//
-	//t.Run("Invalid TLS Configuration", func(t *testing.T) {
-	//	// Test with nil TLS config
-	//	err := SendEmailWithNilTLSConfig(host, port, "user", "pass", "from@example.com",
-	//		"to@example.com", "Test Subject", "Test Body")
-	//	require.Error(t, err, "Should handle nil TLS config")
-	//})
 }
 
 func TestMiddlewareReturnPath(t *testing.T) {
@@ -577,11 +591,15 @@ func TestMiddlewareReturnPath(t *testing.T) {
 	host := server.Hostname
 	// Test cases
 	t.Run("Basic", func(t *testing.T) {
-		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+		err := SendEmailCannedWithCA(certPool, host, addr, "from@example.com",
 			[]string{"to@example.com"}, "Test Subject", "Test Body")
 		require.NoError(t, err, "Should send email successfully")
 
-		m := <-inbox
+		e := <-inbox
+		m, err := e.Mail()
+
+		require.NoError(t, err, "Should get mail successfully")
+
 		head, err := m.Headers()
 		require.NoError(t, err, "Should get headers successfully")
 
@@ -600,11 +618,14 @@ func TestMiddlewareReceivedHeader(t *testing.T) {
 	host := server.Hostname
 	// Test cases
 	t.Run("Basic", func(t *testing.T) {
-		err := SendEmailWithCustomCA(certPool, host, addr, "from@example.com",
+		err := SendEmailCannedWithCA(certPool, host, addr, "from@example.com",
 			[]string{"to@example.com"}, "Test Subject", "Test Body")
 		require.NoError(t, err, "Should send email successfully")
 
-		m := <-inbox
+		e := <-inbox
+		m, err := e.Mail()
+
+		require.NoError(t, err, "Should get mail successfully")
 		head, err := m.Headers()
 		require.NoError(t, err, "Should get headers successfully")
 		fmt.Println(head.Get("Received"))
@@ -640,20 +661,21 @@ func TestMiddlewareOrder(t *testing.T) {
 	// Create an SMTP server for testing
 	inbox, server, certPool := StartTLSServer(addr, t)
 	defer server.Shutdown(context.Background())
-
+	//MIME encoded-word syntax (RFC 2047) to represent non-ASCII characters.
 	t.Run("Basic", func(t *testing.T) {
-
+		res = nil
 		server.Middlewares = append([]brevx.Middleware{}, adder(0), adder(1), adder(2))
 		// Test cases
-		err := SendEmailWithCustomCA(certPool, server.Hostname, addr, "from@example.com",
+		err := SendEmailCannedWithCA(certPool, server.Hostname, addr, "from@example.com",
 			[]string{"to@example.com"}, "Test Subject", "Test Body")
 		require.NoError(t, err, "Should send email successfully")
 		<-inbox
 
 		assert.Equal(t, []string{"pre-0", "pre-1", "pre-2", "post-2", "post-1", "post-0"}, res)
+
 		res = nil
 
-		err = SendEmailWithCustomCA(certPool, server.Hostname, addr, "from@example.com",
+		err = SendEmailCannedWithCA(certPool, server.Hostname, addr, "from@example.com",
 			[]string{"to@example.com"}, "Test Subject", "Test Body")
 		require.NoError(t, err, "Should send email successfully")
 		<-inbox
@@ -663,9 +685,10 @@ func TestMiddlewareOrder(t *testing.T) {
 	})
 
 	t.Run("Early_Return", func(t *testing.T) {
+		res = nil
 		server.Middlewares = append([]brevx.Middleware{}, adder(0), stop, adder(2))
 
-		err := SendEmailWithCustomCA(certPool, server.Hostname, addr, "from@example.com",
+		err := SendEmailCannedWithCA(certPool, server.Hostname, addr, "from@example.com",
 			[]string{"to@example.com"}, "Test Subject", "Test Body")
 		require.ErrorContains(t, err, "Stopped for no good reason")
 
@@ -673,8 +696,65 @@ func TestMiddlewareOrder(t *testing.T) {
 	})
 }
 
-// SendEmailWithCustomCA sends an email using SMTP with a custom CA certificate
-func SendEmailWithCustomCA(certPool *x509.CertPool, host string, addr string, from string, to []string, subject, body string) error {
+func TestEncoding(t *testing.T) {
+
+	// Setup - generate a test CA and server certificate
+	addr := ":2525"
+	// Create an SMTP server for testing
+	inbox, server, certPool := StartTLSServer(addr, t)
+	defer server.Shutdown(context.Background())
+
+	t.Run("UTF8", func(t *testing.T) {
+		// Test cases
+		err := SendEmailCannedWithCA(certPool, server.Hostname, addr, "from@example.com",
+			[]string{"to@example.com"}, "漢字", "Test Body")
+		require.NoError(t, err, "Should send email successfully")
+		e := <-inbox
+		m, err := e.Mail()
+
+		require.NoError(t, err, "Should get mail successfully")
+
+		h, err := m.Headers()
+		require.NoError(t, err, "Should get headers successfully")
+		assert.Equal(t, "漢字", h.Get("Subject"))
+
+	})
+
+	t.Run("Basic", func(t *testing.T) {
+		// Test cases
+		err := SendEmailCannedWithCA(certPool, server.Hostname, addr, "from@example.com",
+			[]string{"to@example.com"}, "=?UTF-8?B?VGVzdCB3aXRoIMOpIGFuZCDkuK3lj7g=?=", "Test Body")
+		require.NoError(t, err, "Should send email successfully")
+		e := <-inbox
+		m, err := e.Mail()
+
+		require.NoError(t, err, "Should get mail successfully")
+
+		h, err := m.Headers()
+		require.NoError(t, err, "Should get headers successfully")
+		assert.Equal(t, "Test with é and 中司", h.Get("Subject"))
+
+	})
+
+}
+
+// SendEmailCannedWithCA sends an email using SMTP with a custom CA certificate
+func SendEmailCannedWithCA(certPool *x509.CertPool, host string, addr string, from string, to []string, subject, body string) error {
+
+	// Construct the message with headers and body
+	msg := fmt.Sprintf("From: %s\r\n"+
+		"To: %s\r\n"+
+		"Subject: %s\r\n"+
+		"MIME-Version: 1.0\r\n"+
+		"Content-Type: text/plain; charset=UTF-8\r\n"+
+		"\r\n"+
+		"%s", from, to, subject, body)
+
+	return SendEmailWithCA(certPool, host, addr, from, to, msg)
+}
+
+// SendEmailCannedWithCA sends an email using SMTP with a custom CA certificate
+func SendEmailWithCA(certPool *x509.CertPool, host string, addr string, from string, to []string, content string) error {
 	// Create a cert pool and add our CA
 
 	// Configure TLS with our cert pool
@@ -716,16 +796,7 @@ func SendEmailWithCustomCA(certPool *x509.CertPool, host string, addr string, fr
 		return fmt.Errorf("failed to open message writer: %w", err)
 	}
 
-	// Construct the message with headers and body
-	msg := fmt.Sprintf("From: %s\r\n"+
-		"To: %s\r\n"+
-		"Subject: %s\r\n"+
-		"MIME-Version: 1.0\r\n"+
-		"Content-Type: text/plain; charset=UTF-8\r\n"+
-		"\r\n"+
-		"%s", from, to, subject, body)
-
-	_, err = w.Write([]byte(msg))
+	_, err = w.Write([]byte(content))
 	if err != nil {
 		return fmt.Errorf("failed to write message: %w", err)
 	}

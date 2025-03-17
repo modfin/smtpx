@@ -1,13 +1,11 @@
 package envelope
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"github.com/crholm/brevx/utils"
-	"io"
 	"net"
 	"net/mail"
 	"net/textproto"
@@ -25,6 +23,9 @@ type Envelope struct {
 
 	// TLS is true if the email was received using a TLS connection
 	TLS bool
+
+	// UTF8
+	UTF8 bool
 
 	// ESMTP: true if EHLO was used
 	ESMTP bool
@@ -49,9 +50,9 @@ func (e *Envelope) WithContext(ctx context.Context) {
 	e.ctx = ctx
 }
 
-func (e *Envelope) ClientId() uint64 {
+func (e *Envelope) ConnectionId() uint64 {
 	ctx := e.Context()
-	u, _ := ctx.Value("client-id").(uint64)
+	u, _ := ctx.Value("connection-id").(uint64)
 	return u
 }
 func (e *Envelope) EnvelopeId() string {
@@ -60,8 +61,8 @@ func (e *Envelope) EnvelopeId() string {
 	return u
 }
 
-func NewEnvelope(remoteAddr net.Addr, clientID uint64) *Envelope {
-	ctx := context.WithValue(context.Background(), "client-id", clientID)
+func NewEnvelope(remoteAddr net.Addr, connectionId uint64) *Envelope {
+	ctx := context.WithValue(context.Background(), "connection-id", connectionId)
 	ctx = context.WithValue(ctx, "envelope-id", utils.XID())
 
 	return &Envelope{
@@ -71,51 +72,22 @@ func NewEnvelope(remoteAddr net.Addr, clientID uint64) *Envelope {
 	}
 }
 
-// AddHeader adds a header to the envelope, operates on the Data buffer
-func (e *Envelope) AddHeader(key, value string) error {
+// PrependHeader adds a header to Data in the envelope, operates on the Data buffer
+func (e *Envelope) PrependHeader(key, value string) error {
 	_, err := e.Data.PrependString(fmt.Sprintf("%s: %s\r\n", textproto.CanonicalMIMEHeaderKey(key), value))
 	return err
 }
 
-// Headers parses the headers from Envelope
-func (e *Envelope) Headers() (textproto.MIMEHeader, error) {
-	header, _, found := bytes.Cut(e.Data.Bytes(), []byte{'\n', '\n'}) // the first two new-lines chars are the End Of Header
+// Mail will "Open" the envelope and return the mail inside it. Ie the Header and Body
+func (e *Envelope) Mail() (*Mail, error) {
 
+	header, body, found := bytes.Cut(e.Data.Bytes(), []byte("\r\n\r\n"))
 	if !found {
-		return nil, errors.New("could not find headers")
+		header, body, found = bytes.Cut(e.Data.Bytes(), []byte("\n\n"))
 	}
-	headerReader := textproto.NewReader(bufio.NewReader(bytes.NewBuffer(header)))
-
-	h, err := headerReader.ReadMIMEHeader()
-	if errors.Is(err, io.EOF) {
-		err = nil
-	}
-	return h, err
-}
-
-// Body returns the email body
-func (e *Envelope) Body() ([]byte, error) {
-	_, body, found := bytes.Cut(e.Data.Bytes(), []byte{'\n', '\n'}) // the first two new-lines chars are the End Of Header
 
 	if !found {
 		return nil, errors.New("could not find body")
 	}
-	return body, nil
-}
-
-func HeaderSubject(headers textproto.MIMEHeader) (*mail.Address, error) {
-	from := headers.Get("Subject")
-	return mail.ParseAddress(from)
-}
-func HeaderFrom(headers textproto.MIMEHeader) (*mail.Address, error) {
-	from := headers.Get("From")
-	return mail.ParseAddress(from)
-}
-func HeaderTo(headers textproto.MIMEHeader) ([]*mail.Address, error) {
-	from := headers.Get("To")
-	return mail.ParseAddressList(from)
-}
-func HeaderCc(headers textproto.MIMEHeader) ([]*mail.Address, error) {
-	cc := headers.Get("Cc")
-	return mail.ParseAddressList(cc)
+	return &Mail{RawHeaders: header, RawBody: body, UTF8: e.UTF8}, nil
 }

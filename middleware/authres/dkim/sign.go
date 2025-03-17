@@ -49,7 +49,7 @@ type SignOptions struct {
 	// The only supported hash algorithm is crypto.SHA256.
 	Hash crypto.Hash
 
-	// Header and body canonicalization algorithms.
+	// Headers and body canonicalization algorithms.
 	//
 	// If empty, CanonicalizationSimple is used.
 	HeaderCanonicalization Canonicalization

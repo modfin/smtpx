@@ -11,7 +11,7 @@ import (
 
 func AddReturnPath(next brevx.HandlerFunc) brevx.HandlerFunc {
 	return func(e *envelope.Envelope) brevx.Response {
-		_ = e.AddHeader("Return-Path", fmt.Sprintf("<%s>", e.MailFrom.Address))
+		_ = e.PrependHeader("Return-Path", fmt.Sprintf("<%s>", e.MailFrom.Address))
 		return next(e)
 	}
 }
@@ -20,7 +20,7 @@ func AddDeliveredHeaders() brevx.Middleware {
 	return func(next brevx.HandlerFunc) brevx.HandlerFunc {
 		return func(e *envelope.Envelope) brevx.Response {
 			if len(e.RcptTo) == 1 {
-				_ = e.AddHeader("Delivered-To", e.RcptTo[0].Address)
+				_ = e.PrependHeader("Delivered-To", e.RcptTo[0].Address)
 			}
 			return next(e)
 		}
@@ -39,7 +39,7 @@ func AddReceivedHeaders(hostname string) brevx.Middleware {
 				protocol = protocol + "S"
 			}
 
-			clientId := e.ClientId()
+			clientId := e.ConnectionId()
 			envelopeId := e.EnvelopeId()
 
 			id := fmt.Sprintf("%d-%s@%s", clientId, envelopeId, hostname)
@@ -52,7 +52,7 @@ func AddReceivedHeaders(hostname string) brevx.Middleware {
 			received += fmt.Sprintf("  %s", time.Now().In(time.UTC).Format(time.RFC1123Z))
 			// save the result
 
-			_ = e.AddHeader("Received", received)
+			_ = e.PrependHeader("Received", received)
 
 			return next(e)
 		}

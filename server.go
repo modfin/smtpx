@@ -132,10 +132,10 @@ type allowedHosts struct {
 type command string
 
 var (
-	cmdHELO     command = "HELO "
-	cmdEHLO     command = "EHLO "
+	cmdHELO     command = "HELO"
+	cmdEHLO     command = "EHLO"
 	cmdHELP     command = "HELP"
-	cmdXCLIENT  command = "XCLIENT "
+	cmdXCLIENT  command = "XCLIENT"
 	cmdMAIL     command = "MAIL FROM:"
 	cmdRCPT     command = "RCPT TO:"
 	cmdRSET     command = "RSET"
@@ -154,7 +154,7 @@ func (c command) match(cmd string) bool {
 }
 
 func (c command) content(in string) string {
-	return in[len(c):] // since we accept mixed cases here...
+	return strings.TrimSpace(in[len(c):]) // since we accept mixed cases here...
 }
 
 // ListenAndServe begin accepting SMTP clients. Will block unless there is an error or Server.Shutdown() is called
@@ -166,7 +166,7 @@ func (s *Server) ListenAndServe() error {
 
 	log := s.log().With("inf", s.Addr)
 
-	var clientID uint64
+	var connectionId uint64
 
 	s.listener, err = net.Listen("tcp", s.Addr)
 	if err != nil {
@@ -178,9 +178,9 @@ func (s *Server) ListenAndServe() error {
 	s.state = ServerStateRunning
 
 	for {
-		log.Debug("Waiting for a new connection", "next_id", clientID+1)
+		log.Debug("Waiting for a new connection", "next_id", connectionId+1)
 		conn, err := s.listener.Accept()
-		clientID++
+		connectionId++
 		if err != nil {
 			log.Info("Server has stopped accepting new clients", "connections", s.countConnections.Load())
 			s.state = ServerStateStopped
@@ -199,9 +199,9 @@ func (s *Server) ListenAndServe() error {
 			defer s.countConnections.Add(-1)
 			defer conn.Close()
 
-			s.handleConn(newConnection(conn, clientID, s.Logger))
+			s.handleConn(newConnection(conn, s.MaxSize, clientID, s.Logger))
 
-		}(conn, clientID)
+		}(conn, connectionId)
 	}
 }
 
@@ -250,16 +250,17 @@ func (s *Server) handleConn(conn *connection) {
 
 	// Extended feature advertisements
 	messageSize := fmt.Sprintf("250-SIZE %d\r\n", s.MaxSize)
-	pipelining := "250-PIPELINING\r\n"
-	advertiseTLS := "250-STARTTLS\r\n"
-	advertiseEnhancedStatusCodes := "250-ENHANCEDSTATUSCODES\r\n"
+	extPipelining := "250-PIPELINING\r\n"
+	extTLS := "250-STARTTLS\r\n"
+	extEnhancedStatusCodes := "250-ENHANCEDSTATUSCODES\r\n"
+	extUFF8 := "250-SMTPUTF8\r\n"
 	// The last line doesn't need \r\n since string will be printed as a new line.
 	// Also, Last line has no dash -
 	help := "250 HELP"
 
 	if s.TLSAlwaysOn && s.TLSConfig != nil {
 		if err := conn.upgradeTLS(s.TLSConfig); err == nil {
-			advertiseTLS = ""
+			extTLS = ""
 		} else {
 			conn.log.Warn("Failed TLS handshake", "err", err)
 			// Server requires TLS, but can't handshake
@@ -269,7 +270,7 @@ func (s *Server) handleConn(conn *connection) {
 	}
 	if s.TLSConfig == nil {
 		// STARTTLS turned off, don't advertise it
-		advertiseTLS = ""
+		extTLS = ""
 	}
 
 	for conn.isAlive() {
@@ -296,13 +297,13 @@ func (s *Server) handleConn(conn *connection) {
 				conn.log.Warn("Timeout", "err", err)
 				return
 			}
-			if errors.Is(err, LineLimitExceeded) {
+			if errors.Is(err, LimitError) {
 				conn.sendResponse(responses.FailLineTooLong)
 				conn.kill()
 				return
 			}
 			if err != nil {
-				conn.log.Warn("Read error", "err", err)
+				conn.log.Warn("Could not read command", "err", err)
 				conn.kill()
 				return
 			}
@@ -345,14 +346,15 @@ func (s *Server) handleConn(conn *connection) {
 				conn.resetTransaction()
 
 				content := cmdHELO.content(cmd)
-				conn.Helo = strings.TrimSpace(content)
+				conn.Helo = content
 				conn.ESMTP = true
 
 				conn.sendResponse(ehlo,
 					messageSize,
-					pipelining,
-					advertiseTLS,
-					advertiseEnhancedStatusCodes,
+					extPipelining,
+					extTLS,
+					extEnhancedStatusCodes,
+					extUFF8,
 					help)
 				continue
 
@@ -425,7 +427,7 @@ func (s *Server) handleConn(conn *connection) {
 					conn.sendResponse(greeting)
 					continue
 				default:
-					conn.log.Error("PROXY parse error, expected 5 or 6 parts", "data", content)
+					conn.log.Debug("PROXY, parse error, expected 5 or 6 parts", "data", content)
 					conn.sendResponse(responses.FailSyntaxError)
 					continue
 				}
@@ -440,9 +442,14 @@ func (s *Server) handleConn(conn *connection) {
 					continue
 				}
 				content := cmdMAIL.content(cmd)
-				conn.MailFrom, err = mail.ParseAddress(string(content))
+				addr, charser, _ := strings.Cut(content, " ")
+				if charser == CharsetUtf8 {
+					conn.charset = CharsetUtf8
+					conn.Envelope.UTF8 = true
+				}
+				conn.MailFrom, err = mail.ParseAddress(addr)
 				if err != nil {
-					conn.log.Error("MAIL parse error", "data", "["+string(content)+"]", "err", err)
+					conn.log.Debug("MAIL, parse error", "data", "["+string(content)+"]", "err", err)
 					conn.sendResponse(responses.RejectedSenderMailCmd)
 					conn.errors++
 					continue
@@ -464,7 +471,7 @@ func (s *Server) handleConn(conn *connection) {
 				content := cmdRCPT.content(cmd)
 				to, err := mail.ParseAddress(content)
 				if err != nil {
-					conn.log.Error("RCPT parse error", "data", content, "err", err)
+					conn.log.Debug("RCPT, parse error", "data", content, "err", err)
 					conn.sendResponse(responses.FailSyntaxError)
 					conn.errors++
 					continue
@@ -541,29 +548,19 @@ func (s *Server) handleConn(conn *connection) {
 
 		case ConnData:
 
-			// intentionally placed the limit 1MB above so that reading does not return with an error
-			// if the connection goes a little over. Anything above will err
-			// TODO make a limit to readers...
-			//conn.bufin.setLimit(s.MaxSize + 1024000) // This a hard limit.
+			_, err := conn.Envelope.Data.ReadFrom(conn.in.DotReader())
 
-			n, err := conn.Envelope.Data.ReadFrom(conn.in.DotReader())
-			if n > s.MaxSize {
-				err = fmt.Errorf("maximum DATA size exceeded (%d)", s.MaxSize)
+			if errors.Is(err, LimitError) {
+				conn.log.Debug("DATA, to much data sent", "err", err)
+				conn.sendResponse(responses.FailMessageSizeExceeded, " ", LimitError.Error())
+				conn.kill()
+				continue
 			}
+
 			if err != nil {
-				conn.log.Error("error reading data", "err", err)
-				if errors.Is(err, LineLimitExceeded) {
-					conn.sendResponse(responses.FailReadLimitExceededDataCmd, " ", LineLimitExceeded.Error())
-					conn.kill()
-				} else if errors.Is(err, MessageSizeExceeded) {
-					conn.sendResponse(responses.FailMessageSizeExceeded, " ", MessageSizeExceeded.Error())
-					conn.kill()
-				} else {
-					conn.sendResponse(responses.FailReadErrorDataCmd, " ", err.Error())
-					conn.kill()
-				}
-				conn.log.Warn("Error reading data", "err", err)
-				conn.resetTransaction()
+				conn.log.Warn("DATA, error reading data", "err", err)
+				conn.sendResponse(responses.FailReadErrorDataCmd, " ", err.Error())
+				conn.kill()
 				continue
 			}
 
@@ -583,7 +580,7 @@ func (s *Server) handleConn(conn *connection) {
 				resp = responses.SuccessMessageAccepted
 			}
 			if resp.Class() != responses.ClassSuccess { // indicates that we should abort
-				conn.log.Info("Data processing failed", "response", resp.String())
+				conn.log.Debug("DATA, processing failed", "response", resp.String())
 				conn.sendResponse(resp)
 				conn.errors++
 				continue
@@ -604,24 +601,24 @@ func (s *Server) handleConn(conn *connection) {
 
 		case ConnStartTLS:
 			if conn.TLS { // already in tls mode...
-				conn.log.Warn("Failed TLS start, tls is alreade active")
+				conn.log.Warn("TLS, Failed TLS start, tls is alreade active")
 				conn.state = ConnCmd
 				continue
 			}
 
 			if s.TLSConfig == nil { // no tls config available
-				conn.log.Warn("Failed TLS start, no tls config")
+				conn.log.Warn("TLS, Failed TLS start, no tls config")
 				conn.state = ConnCmd
 				continue
 			}
 
 			err := conn.upgradeTLS(s.TLSConfig)
 			if err != nil {
-				conn.log.Warn("Failed TLS handshake", "err", err)
+				conn.log.Warn("TLS, Failed TLS handshake", "err", err)
 				conn.state = ConnCmd
 				continue
 			}
-			advertiseTLS = ""
+			extTLS = ""
 			conn.resetTransaction()
 			conn.state = ConnCmd
 			continue
