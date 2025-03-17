@@ -10,11 +10,6 @@
 go get github.com/modfin/smtpx
 ```
 
-Middleware
-```bash
-go get github.com/modfin/smtpx/middleware
-```
-
 ## Usage
 
 One idea for smtpx is to have it feel familiar and have the same feel as the standard library has for `net/http`.
