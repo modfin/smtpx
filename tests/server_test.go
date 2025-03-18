@@ -45,7 +45,7 @@ func StartTLSServer(inf string, t *testing.T, middlewares ...smtpx.Middleware) (
 		Middlewares: middlewares,
 		Handler: smtpx.NewHandler(func(e *envelope.Envelope) smtpx.Response {
 			mails <- e
-			return smtpx.NewResponse(250, "Added to spool")
+			return nil
 		}),
 		TLSConfig: tlscfg,
 	}
@@ -607,6 +607,135 @@ func TestMiddlewareReturnPath(t *testing.T) {
 	})
 }
 
+func TestMiddlewareNilCheck(t *testing.T) {
+	// Setup - generate a test CA and server certificate
+	addr := ":2525"
+	// Create an SMTP server for testing
+
+	nilCheck := func(next smtpx.HandlerFunc) smtpx.HandlerFunc {
+		return func(e *envelope.Envelope) smtpx.Response {
+			res := next(e)
+			require.NotNil(t, res, "next should never return nil, nil shall be converted to 250 Message Accepted")
+			return nil
+		}
+	}
+
+	inbox, server, certPool := StartTLSServer(addr, t, nilCheck, nilCheck, nilCheck)
+	defer server.Shutdown(context.Background())
+
+	// Get the server address
+	host := server.Hostname
+	// Test cases
+	t.Run("Basic", func(t *testing.T) {
+		err := SendEmailCannedWithCA(certPool, host, addr, "from@example.com",
+			[]string{"to@example.com"}, "Test Subject", "Test Body")
+		require.NoError(t, err, "Should send email successfully")
+
+		select {
+		case <-inbox:
+		case <-time.After(time.Second):
+			t.Error("Should receive email successfully")
+		}
+	})
+}
+
+func TestMiddlewareSenderDomain(t *testing.T) {
+	// Setup - generate a test CA and server certificate
+	addr := ":2525"
+	// Create an SMTP server for testing
+	inbox, server, certPool := StartTLSServer(addr, t, middleware.SenderDomainsWhitelist("example.com"))
+	defer server.Shutdown(context.Background())
+
+	// Get the server address
+	host := server.Hostname
+	// Test cases
+	t.Run("Success", func(t *testing.T) {
+		err := SendEmailCannedWithCA(certPool, host, addr, "from@example.com",
+			[]string{"to@example.com"}, "Test Subject", "Test Body")
+		require.NoError(t, err, "Should send email successfully")
+
+		select {
+		case <-inbox:
+		case <-time.After(time.Second):
+			t.Error("Should receive email successfully")
+		}
+	})
+	t.Run("Fail", func(t *testing.T) {
+		err := SendEmailCannedWithCA(certPool, host, addr, "from@blacklist.com",
+			[]string{"to@example.com"}, "Test Subject", "Test Body")
+
+		require.Error(t, err, "Should not send email successfully")
+		require.ErrorContains(t, err, "Sender domain not allowed")
+
+	})
+
+	t.Run("FailThenSuccess", func(t *testing.T) {
+
+		msg := fmt.Sprintf("From: %s\r\n"+
+			"To: %s\r\n"+
+			"Subject: %s\r\n"+
+			"MIME-Version: 1.0\r\n"+
+			"Content-Type: text/plain; charset=UTF-8\r\n"+
+			"\r\n"+
+			"%s", "from@from.com", "to@to.com", "subject", "body")
+
+		c, err := ConnWithCA(certPool, host, addr)
+		defer c.Close()
+
+		/// Failing from blacklist
+
+		// Set the sender
+		err = c.Mail("from@blacklist.com")
+		require.NoError(t, err, "Should set sender successfully")
+
+		// Set the recipient
+		err = c.Rcpt("to@example.com")
+		require.NoError(t, err, "Should set recipient successfully")
+
+		// Send the email body
+		w, err := c.Data()
+		require.NoError(t, err, "Should set data successfully")
+
+		_, err = w.Write([]byte(msg))
+		require.NoError(t, err, "Should write data successfully")
+
+		err = w.Close()
+		require.Error(t, err, "Sender should fail heare")
+		require.ErrorContains(t, err, "Sender domain not allowed")
+
+		/// Resetting and trying again with valid domain
+
+		err = c.Reset()
+		require.NoError(t, err, "Should reset successfully")
+
+		err = c.Mail("from@example.com")
+		require.NoError(t, err, "Should set sender successfully")
+
+		err = c.Rcpt("to@example.com")
+		require.NoError(t, err, "Should set recipient successfully")
+
+		w, err = c.Data()
+		require.NoError(t, err, "Should set data successfully")
+
+		_, err = w.Write([]byte(msg))
+		require.NoError(t, err, "Should write data successfully")
+
+		err = w.Close()
+		require.NoError(t, err, "Should close data successfully")
+
+		err = c.Quit()
+		require.NoError(t, err, "Should quit successfully")
+
+		select {
+		case <-inbox:
+		case <-time.After(time.Second):
+			t.Error("Should receive email successfully")
+
+		}
+
+	})
+}
+
 func TestMiddlewareReceivedHeader(t *testing.T) {
 	// Setup - generate a test CA and server certificate
 	addr := ":2525"
@@ -755,28 +884,8 @@ func SendEmailCannedWithCA(certPool *x509.CertPool, host string, addr string, fr
 
 // SendEmailCannedWithCA sends an email using SMTP with a custom CA certificate
 func SendEmailWithCA(certPool *x509.CertPool, host string, addr string, from string, to []string, content string) error {
-	// Create a cert pool and add our CA
-
-	// Configure TLS with our cert pool
-	tlsConfig := &tls.Config{
-		RootCAs:    certPool,
-		ServerName: host,
-	}
-
-	// Connect to the SMTP server (without TLS initially)
-	c, err := smtp.Dial(addr)
-	if err != nil {
-		return fmt.Errorf("failed to connect to SMTP server: %w", err)
-	}
+	c, err := ConnWithCA(certPool, host, addr)
 	defer c.Close()
-
-	// Check if the server supports STARTTLS
-	if ok, _ := c.Extension("STARTTLS"); ok {
-		// Start TLS
-		if err = c.StartTLS(tlsConfig); err != nil {
-			return fmt.Errorf("failed to start TLS: %w", err)
-		}
-	}
 
 	// Set the sender
 	if err = c.Mail(from); err != nil {
@@ -807,4 +916,31 @@ func SendEmailWithCA(certPool *x509.CertPool, host string, addr string, from str
 
 	// Send the QUIT command and close the connection
 	return c.Quit()
+}
+
+// SendEmailCannedWithCA sends an email using SMTP with a custom CA certificate
+func ConnWithCA(certPool *x509.CertPool, host string, addr string) (*smtp.Client, error) {
+	// Create a cert pool and add our CA
+
+	// Configure TLS with our cert pool
+	tlsConfig := &tls.Config{
+		RootCAs:    certPool,
+		ServerName: host,
+	}
+
+	// Connect to the SMTP server (without TLS initially)
+	c, err := smtp.Dial(addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to SMTP server: %w", err)
+	}
+
+	// Check if the server supports STARTTLS
+	if ok, _ := c.Extension("STARTTLS"); ok {
+		// Start TLS
+		if err = c.StartTLS(tlsConfig); err != nil {
+			return nil, fmt.Errorf("failed to start TLS: %w", err)
+		}
+	}
+
+	return c, nil
 }

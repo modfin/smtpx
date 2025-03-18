@@ -565,14 +565,18 @@ func (s *Server) handleConn(conn *connection) {
 				continue
 			}
 
-			// Ensuring that response is not nil when returning to middleware
-			var start HandlerFunc = func(envelope *envelope.Envelope) Response {
-				res := s.Handler.Data(envelope)
-				if res == nil {
-					res = responses.SuccessMessageAccepted
+			/// Below nil2success enures that a nil return from a handler function is converted to SuccessMessageAccepted
+			nil2success := func(handler HandlerFunc) HandlerFunc {
+				return func(envelope *envelope.Envelope) Response {
+					res := handler(envelope)
+					if res == nil {
+						res = responses.SuccessMessageAccepted
+					}
+					return res
 				}
-				return res
 			}
+
+			var start HandlerFunc = nil2success(s.Handler.Data)
 
 			middlewares := append([]Middleware{}, s.Middlewares...)
 			slices.Reverse(middlewares)
@@ -581,14 +585,7 @@ func (s *Server) handleConn(conn *connection) {
 				if middleware == nil {
 					continue
 				}
-				exec := middleware(start)
-				start = func(e *envelope.Envelope) Response { // To ensure that nil is translated to success
-					res := exec(e)
-					if res == nil {
-						res = responses.SuccessMessageAccepted
-					}
-					return res
-				}
+				start = nil2success(middleware(start))
 			}
 			resp := start(conn.Envelope)
 
@@ -597,9 +594,7 @@ func (s *Server) handleConn(conn *connection) {
 			}
 			if resp.Class() != responses.ClassSuccess { // indicates that we should abort
 				conn.log.Debug("DATA, processing failed", "response", resp.String())
-				conn.sendResponse(resp)
 				conn.errors++
-				continue
 			}
 			if resp.Class() == responses.ClassSuccess {
 				conn.messagesSent++
