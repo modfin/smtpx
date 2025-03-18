@@ -48,10 +48,18 @@ func Logger(logger *slog.Logger, opts ...Option) smtpx.Middleware {
 
 	settings.PostFields = []func(*envelope.Envelope, smtpx.Response) (string, any){
 		func(envelope *envelope.Envelope, res smtpx.Response) (string, any) {
-			return "code", res.StatusCode()
+			code := 250
+			if res != nil {
+				code = res.StatusCode()
+			}
+			return "code", code
 		},
 		func(envelope *envelope.Envelope, res smtpx.Response) (string, any) {
-			return "response", res.String()
+			var s string
+			if res != nil {
+				s = res.String()
+			}
+			return "response", s
 		},
 		func(envelope *envelope.Envelope, res smtpx.Response) (string, any) {
 			return "size", envelope.Data.Len()

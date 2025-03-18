@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"github.com/modfin/smtpx/envelope"
 	"github.com/modfin/smtpx/responses"
 	"io"
 	"log/slog"
@@ -564,15 +565,30 @@ func (s *Server) handleConn(conn *connection) {
 				continue
 			}
 
+			// Ensuring that response is not nil when returning to middleware
+			var start HandlerFunc = func(envelope *envelope.Envelope) Response {
+				res := s.Handler.Data(envelope)
+				if res == nil {
+					res = responses.SuccessMessageAccepted
+				}
+				return res
+			}
+
 			middlewares := append([]Middleware{}, s.Middlewares...)
 			slices.Reverse(middlewares)
 
-			var start HandlerFunc = s.Handler.Data
 			for _, middleware := range middlewares {
 				if middleware == nil {
 					continue
 				}
-				start = middleware(start)
+				exec := middleware(start)
+				start = func(e *envelope.Envelope) Response { // To ensure that nil is translated to success
+					res := exec(e)
+					if res == nil {
+						res = responses.SuccessMessageAccepted
+					}
+					return res
+				}
 			}
 			resp := start(conn.Envelope)
 

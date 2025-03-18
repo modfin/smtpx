@@ -3,8 +3,7 @@ module github.com/modfin/smtpx/tests
 go 1.24.1
 
 require (
-	github.com/modfin/smtpx v0.0.0
-	github.com/modfin/smtpx/middleware v0.0.0
+	github.com/modfin/smtpx v0.2.1
 	github.com/stretchr/testify v1.10.0
 )
 
@@ -19,5 +18,3 @@ require (
 )
 
 replace github.com/modfin/smtpx => ..
-
-replace github.com/modfin/smtpx/middleware => ../middleware
