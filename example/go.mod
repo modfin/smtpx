@@ -4,7 +4,6 @@ go 1.24.1
 
 require (
 	github.com/modfin/smtpx v0.0.0
-	github.com/modfin/smtpx/middleware v0.0.0
 	golang.org/x/crypto v0.36.0
 )
 
@@ -14,7 +13,4 @@ require (
 	golang.org/x/text v0.23.0 // indirect
 )
 
-replace (
-	github.com/modfin/smtpx => ..
-	github.com/modfin/smtpx/middleware => ../middleware
-)
+replace github.com/modfin/smtpx => ..
