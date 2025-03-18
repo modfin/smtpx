@@ -31,7 +31,7 @@ func Logger(logger *slog.Logger, opts ...Option) smtpx.Middleware {
 			return "HELO", e.Helo
 		},
 
-		func(envelope *envelope.Envelope) (string, any) { return "Remote", envelope.RemoteAddr },
+		func(envelope *envelope.Envelope) (string, any) { return "remote-ip", envelope.RemoteAddr },
 		func(envelope *envelope.Envelope) (string, any) { return "MAIL", envelope.MailFrom.Address },
 		func(envelope *envelope.Envelope) (string, any) {
 			var tos []string
@@ -87,6 +87,7 @@ func Logger(logger *slog.Logger, opts ...Option) smtpx.Middleware {
 			lvl := slog.LevelInfo
 
 			l := logger.With("envelope-id", envelope.EnvelopeId())
+			l = logger.With("connection-id", envelope.ConnectionId())
 
 			if m, _ := envelope.Mail(); m != nil {
 				if h, _ := m.Headers(); h != nil {

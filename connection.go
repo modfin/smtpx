@@ -57,14 +57,21 @@ type connection struct {
 // newConnection allocates a new connection.
 func newConnection(conn net.Conn, maxMessageSize int64, connectionId uint64, logger *slog.Logger) *connection {
 
+	env := envelope.NewEnvelope(conn.RemoteAddr(), connectionId)
 	c := &connection{
 		conn: conn,
 
-		Envelope:    envelope.NewEnvelope(conn.RemoteAddr(), connectionId),
+		Envelope:    env,
 		ConnectedAt: time.Now(),
 		charset:     CharsetDefault,
 		in:          NewSMTPReader(conn, maxMessageSize),
-		log:         logger.With("id", connectionId, "ip", conn.RemoteAddr()),
+		log: logger.With(
+			"connection-id", env.ConnectionId(),
+			// This is change when a multiple emails are sent.
+			// Will stack with regular slog implementation
+			//"envelope-id", env.EnvelopeId(),
+
+			"remote-ip", conn.RemoteAddr()),
 	}
 	return c
 }
@@ -121,9 +128,9 @@ func (c *connection) sendResponse(r ...interface{}) {
 // TLS handshake
 func (c *connection) resetTransaction() {
 	c.Envelope = envelope.NewEnvelope(c.RemoteAddr, c.ConnectionId())
-
-	// to have a fresh limit
 	c.in.ResetLimit()
+
+	c.log.Debug("transaction reset")
 }
 
 // isInTransaction returns true if the connection is inside a transaction.

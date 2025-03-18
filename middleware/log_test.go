@@ -49,7 +49,7 @@ func TestLogger(t *testing.T) {
 
 	assert.Contains(t, logOutput, "Mail request")
 	assert.Contains(t, logOutput, "HELO=test.com")
-	assert.Contains(t, logOutput, "Remote=127.0.0.1:12345")
+	assert.Contains(t, logOutput, "remote-ip=127.0.0.1:12345")
 	assert.Contains(t, logOutput, "MAIL=sender@example.com")
 	assert.Contains(t, logOutput, "RCPT=[recipient@example.com]")
 	assert.Contains(t, logOutput, "TLS=true")
@@ -99,7 +99,7 @@ func TestLoggerNil(t *testing.T) {
 
 	assert.Contains(t, logOutput, "Mail request")
 	assert.Contains(t, logOutput, "HELO=test.com")
-	assert.Contains(t, logOutput, "Remote=127.0.0.1:12345")
+	assert.Contains(t, logOutput, "remote-ip=127.0.0.1:12345")
 	assert.Contains(t, logOutput, "MAIL=sender@example.com")
 	assert.Contains(t, logOutput, "RCPT=[recipient@example.com]")
 	assert.Contains(t, logOutput, "TLS=true")
