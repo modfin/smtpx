@@ -758,10 +758,16 @@ func TestMiddlewareReceivedHeader(t *testing.T) {
 		head, err := m.Headers()
 		require.NoError(t, err, "Should get headers successfully")
 		fmt.Println(head.Get("Received"))
-		assert.Contains(t, head.Get("Received"), "to@example.com")
+		assert.Contains(t, head.Get("Received"), "<to@example.com>")
 		assert.Contains(t, head.Get("Received"), "localhost")
 		assert.Contains(t, head.Get("Received"), "127.0.0.1")
 		assert.Contains(t, head.Get("Received"), "example.com")
+
+		parts := strings.Split(head.Get("Received"), ";")
+		last := strings.TrimSpace(parts[len(parts)-1])
+		_, err = time.Parse(time.RFC1123Z, last)
+		require.NoError(t, err, "Should parse date successfully")
+
 	})
 }
 

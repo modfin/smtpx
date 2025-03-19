@@ -22,7 +22,7 @@ func FilterRecipient(include func(address *mail.Address) bool) smtpx.Middleware 
 				return next(e)
 			}
 
-			return smtpx.NewResponse(550, "Recipient domain not allowed")
+			return smtpx.NewResponse(550, "filtered recipient")
 		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/modfin/smtpx"
 	"github.com/modfin/smtpx/envelope"
+	"strings"
 	"time"
 )
 
@@ -47,7 +48,9 @@ func AddReceivedHeaders(hostname string) smtpx.Middleware {
 			if len(e.RcptTo) == 1 {
 				received += fmt.Sprintf("  for <%s>\r\n", e.RcptTo[0].Address)
 			}
-			received += fmt.Sprintf("  %s", time.Now().In(time.UTC).Format(time.RFC1123Z))
+			received = strings.TrimSpace(received)
+
+			received += fmt.Sprintf(";\r\n  %s", time.Now().In(time.UTC).Format(time.RFC1123Z))
 			// save the result
 
 			_ = e.PrependHeader("Received", received)
