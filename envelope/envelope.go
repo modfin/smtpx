@@ -1,9 +1,7 @@
 package envelope
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"github.com/modfin/smtpx/utils"
 	"net"
@@ -90,14 +88,5 @@ func (e *Envelope) PrependHeader(key, value string) error {
 
 // Mail will "Open" the envelope and return the mail inside it. Ie the Header and Body
 func (e *Envelope) Mail() (*Mail, error) {
-
-	header, body, found := bytes.Cut(e.Data.Bytes(), []byte("\r\n\r\n"))
-	if !found {
-		header, body, found = bytes.Cut(e.Data.Bytes(), []byte("\n\n"))
-	}
-
-	if !found {
-		return nil, errors.New("could not find body")
-	}
-	return &Mail{RawHeaders: header, RawBody: body, UTF8: e.UTF8}, nil
+	return NewMail(e.Data.Bytes(), e.UTF8)
 }

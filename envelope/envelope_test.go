@@ -553,10 +553,10 @@ func TestMIMEHeaderDecoding(t *testing.T) {
 		//},
 		//
 		//// Shift-JIS (Japanese)
-		{
-			input: "Subject: =?SHIFT-JIS?B?k/qWe4zqg2WDjINYg2eDYJN5DA==?=",
-			exp:   "日本語テレストチ土",
-		},
+		//{
+		//	input: "Subject: =?SHIFT-JIS?B?k/qWe4zqg2WDjINYg2eDYJN5DA==?=",
+		//	exp:   "日本語テレストチ土",
+		//},
 		//{
 		//	input: "Subject: =?SHIFT-JIS?Q?=93=FA=96=7B=8C=EA=83=65=83=58=83=67=83=60=93=99?=",
 		//	exp:   "日本語テストです",

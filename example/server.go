@@ -66,7 +66,7 @@ func main() {
 			fmt.Println("From:", headers.Get("From"))
 			fmt.Println("To:", headers.Get("To"))
 			fmt.Println("Subject:", headers.Get("Subject"))
-			fmt.Println("Body:", string(mail.Body()))
+			fmt.Println("Body:", string(mail.RawBody))
 
 			return smtpx.NewResponse(250, "OK")
 		}),
