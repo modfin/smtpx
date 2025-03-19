@@ -223,8 +223,6 @@ func dkimCheck(e *envelope.Envelope) []*authres.DKIMResult {
 	var res []*authres.DKIMResult
 
 	for _, v := range verifications {
-
-		fmt.Println(v.HeaderKeys)
 		var val authres.ResultValue = authres.ResultFail
 		if v.Err == nil {
 			val = authres.ResultPass
@@ -251,11 +249,14 @@ func spfCheck(e *envelope.Envelope) *authres.SPFResult {
 	var reason string
 	var from = e.MailFrom.Address
 
+	ip, _, _ := strings.Cut(e.RemoteAddr.String(), ":")
+
 	result, err := spf.CheckHostWithSender(
-		net.ParseIP(e.RemoteAddr.String()),
+		net.ParseIP(ip),
 		e.Helo,
 		from,
 	)
+
 	if err != nil {
 		reason = err.Error()
 	}

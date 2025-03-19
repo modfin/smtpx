@@ -76,3 +76,75 @@ func TestAddAuthenticationResult(t *testing.T) {
 		t.Errorf("Expected number of results to be %v, but got %v", 2, len(res))
 	}
 }
+
+func TestSPFCheck(t *testing.T) {
+	tests := []struct {
+		name       string
+		ip         string
+		helo       string
+		from       string
+		wantResult authres.ResultValue
+		wantReason string
+	}{
+		{
+			name:       "SPF Pass",
+			ip:         "89.160.105.250",
+			helo:       "modfin.se",
+			from:       "test@modfin.se",
+			wantResult: authres.ResultPass,
+			wantReason: "matched ip",
+		},
+		{
+			name:       "SPF Nested Pass",
+			ip:         "198.2.128.2",
+			helo:       "modularfinance.se",
+			from:       "test@modularfinance.se",
+			wantResult: authres.ResultPass,
+			wantReason: "matched ip",
+		},
+		{
+			name:       "SPF Nested MX Pass",
+			ip:         "46.21.101.51",
+			helo:       "modularfinance.se",
+			from:       "test@modularfinance.se",
+			wantResult: authres.ResultPass,
+			wantReason: "matched mx",
+		},
+		{
+			name:       "SPF Fail",
+			ip:         "127.0.0.1",
+			helo:       "example.com",
+			from:       "test@example.com",
+			wantResult: authres.ResultFail,
+			wantReason: "matched all",
+		},
+		{
+			name:       "SPF SoftFail",
+			ip:         "127.0.0.1",
+			helo:       "modfin.se",
+			from:       "test@modfin.se",
+			wantResult: authres.ResultSoftFail,
+			wantReason: "matched all",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := &envelope.Envelope{
+				RemoteAddr: &net.TCPAddr{IP: net.ParseIP(tt.ip), Port: 12345},
+				Helo:       tt.helo,
+				MailFrom:   &mail.Address{Address: tt.from},
+			}
+
+			result := spfCheck(e)
+
+			if result.Value != tt.wantResult {
+				t.Errorf("spfCheck() result = %v, want %v", result.Value, tt.wantResult)
+			}
+
+			if result.Reason != tt.wantReason {
+				t.Errorf("spfCheck() reason = %v, want %v", result.Reason, tt.wantReason)
+			}
+		})
+	}
+}
