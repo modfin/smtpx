@@ -132,4 +132,6 @@ var charsetAliases = map[string]string{
 	"ms936":      "gbk",
 	"ansi950":    "big5",
 	"cp950":      "big5",
+	"koi8-r":     "koi8r",
+	"koi8-u":     "koi8u",
 }

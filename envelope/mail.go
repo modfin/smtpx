@@ -3,14 +3,27 @@ package envelope
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
+	"mime/quotedprintable"
 	"net/textproto"
+	"net/url"
+	"strings"
 )
 
+// NewMail returns a new mail struct. It takes in a byte slice of the entire email contant. ie. header + body
+// eg
+//
+//	From: sender@example.com
+//	To: recipient@example.com
+//	Subject: Test Email
+//	Content-Type: text/plain
+//
+//	This is a test email body.
 func NewMail(data []byte, utf8 bool) (*Mail, error) {
 	header, body, found := bytes.Cut(data, []byte("\r\n\r\n"))
 	if !found {
@@ -63,13 +76,6 @@ func (e *Mail) Headers() (textproto.MIMEHeader, error) {
 	return h, err
 }
 
-type Content struct {
-	Headers textproto.MIMEHeader
-	Body    []byte
-
-	Children []Content
-}
-
 func (e *Mail) Body() (*Content, error) {
 	h, err := e.Headers()
 	if err != nil {
@@ -104,18 +110,24 @@ func parseContent(headers textproto.MIMEHeader, body io.Reader) (*Content, error
 
 	content := &Content{Headers: headers}
 
-	switch mediaType {
-	case "multipart/mixed", "multipart/alternative", "multipart/related", "multipart/signed":
+	if strings.HasPrefix(mediaType, "multipart/") {
+		boundary := params["boundary"]
+
+		if boundary == "" {
+			return nil, errors.New("no boundary in Content-Type params")
+		}
+
 		mr := multipart.NewReader(body, params["boundary"])
 
 		for {
 			p, err := mr.NextPart()
 			if err == io.EOF {
-				return content, nil
+				break
 			}
 			if err != nil {
 				return nil, fmt.Errorf("failed to get part: %w", err)
 			}
+
 			child, err := parseContent(p.Header, p)
 			if err != nil {
 				return nil, err
@@ -123,13 +135,186 @@ func parseContent(headers textproto.MIMEHeader, body io.Reader) (*Content, error
 			content.Children = append(content.Children, *child)
 		}
 
-	default:
-
-		content.Body, err = io.ReadAll(body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read body: %w", err)
-		}
-
 		return content, nil
 	}
+
+	content.Body, err = io.ReadAll(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read body: %w", err)
+	}
+
+	return content, nil
+
+}
+
+type Content struct {
+	Headers  textproto.MIMEHeader
+	Body     []byte
+	Children []Content
+}
+
+func (c *Content) filename() (string, error) {
+
+	header := c.Headers.Get("Content-Disposition")
+	_, params, err := mime.ParseMediaType(header)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse Content-Disposition: %w", err)
+	}
+	name := params["filename"]
+	if name == "" {
+		_, params, err = mime.ParseMediaType(c.Headers.Get("Content-Type"))
+		if err != nil {
+			return "", fmt.Errorf("failed to parse Content-Tyep: %w", err)
+		}
+		name = params["name"]
+	}
+
+	if name == "" {
+		return "", errors.New("no filename in Content-Disposition nor name in Content-Type params")
+	}
+
+	if !strings.Contains(header, "filename*") { // if not  RFC5987, percent decode
+		name, err = url.QueryUnescape(name)
+		if err != nil {
+			return "", fmt.Errorf("failed to unescape filename: %w", err)
+		}
+	}
+	return name, nil
+}
+
+func (c *Content) Encoding() string {
+	enc := c.Headers.Get("Content-Transfer-Encoding")
+	if enc == "" {
+		enc = "7bit"
+	}
+	return enc
+}
+
+func (c *Content) Decode() ([]byte, error) {
+	enc := c.Encoding()
+
+	ct := c.Headers.Get("Content-Type")
+	_, params, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Content-Type: %w", err)
+	}
+	charset := strings.ToLower(params["charset"])
+
+	if charset == "" {
+		charset = "utf-8"
+	}
+
+	// Todo, decode the charset...
+	switch enc {
+
+	case "quoted-printable":
+
+		data, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(c.Body)))
+
+		return data, err
+	case "base64":
+		return base64.StdEncoding.DecodeString(string(c.Body))
+	case "7bit", "8bit", "binary":
+		return c.Body, nil
+	default:
+		return nil, fmt.Errorf("unknown encoding: %s", enc)
+	}
+
+}
+
+func (c *Content) Flatten() []*Content {
+
+	if c.Leaf() {
+		return []*Content{&Content{
+			Headers:  c.Headers,
+			Body:     c.Body,
+			Children: nil,
+		}}
+	}
+	var res []*Content
+	for _, child := range c.Children {
+		res = append(res, child.Flatten()...)
+	}
+
+	return res
+}
+
+func (c *Content) Leaf() bool {
+	return len(c.Children) == 0 && !strings.HasPrefix(c.Headers.Get("Content-Type"), "multipart/")
+}
+
+func (c *Content) IsForm() bool {
+	_type, _, _ := mime.ParseMediaType(c.Headers.Get("Content-Disposition"))
+	return strings.ToLower(_type) == "form-data"
+}
+
+func (c *Content) AsForm() (*FormPart, error) {
+	if !c.IsForm() {
+		return nil, errors.New("not a form")
+	}
+	return &FormPart{c}, nil
+}
+
+func (c *Content) IsInline() bool {
+	_type, _, _ := mime.ParseMediaType(c.Headers.Get("Content-Disposition"))
+	return strings.ToLower(_type) == "inline"
+}
+
+func (c *Content) AsInline() (*InlinePart, error) {
+	if !c.IsInline() {
+		return nil, errors.New("not an inline")
+	}
+
+	return &InlinePart{c}, nil
+}
+
+func (c *Content) IsAttachment() bool {
+	_type, _, _ := mime.ParseMediaType(c.Headers.Get("Content-Disposition"))
+	return strings.ToLower(_type) == "attachment"
+}
+
+func (c *Content) AsAttachment() (*AttachmentPart, error) {
+	if !c.IsAttachment() {
+		return nil, errors.New("not an attachment")
+	}
+
+	return &AttachmentPart{c}, nil
+}
+
+type FormPart struct {
+	c *Content
+}
+
+func (a *FormPart) Filename() (string, error) {
+	return a.c.filename()
+}
+
+func (a *FormPart) Name() (string, error) {
+	header := a.c.Headers.Get("Content-Disposition")
+	_, params, err := mime.ParseMediaType(header)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse Content-Disposition: %w", err)
+	}
+	name := params["name"]
+	if name == "" {
+		return "", errors.New("no name in Content-Disposition params")
+	}
+
+	return name, nil
+}
+
+type InlinePart struct {
+	c *Content
+}
+
+func (a *InlinePart) Filename() (string, error) {
+	return a.c.filename()
+}
+
+type AttachmentPart struct {
+	c *Content
+}
+
+func (a *AttachmentPart) Filename() (string, error) {
+	return a.c.filename()
 }

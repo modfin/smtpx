@@ -382,11 +382,11 @@ func TestMIMEHeaderDecoding(t *testing.T) {
 		},
 
 		// TODO someting to add all charsets in how we parse headers...
-		// ISO-8859-2 (Latin-2, Central European)
-		//{
-		//	input: "Subject: =?ISO-8859-2?B?UG9sc2tpZSB6bmFraTog5eXt7A==?=",
-		//	exp:   "Polskie znaki: ĺĺíě",
-		//},
+		//ISO-8859-2 (Latin-2, Central European)
+		{
+			input: "Subject: =?ISO-8859-2?B?UG9sc2tpZSB6bmFraTog5eXt7A==?=",
+			exp:   "Polskie znaki: ĺĺíě",
+		},
 		//{
 		//	input: "Subject: =?ISO-8859-2?Q?=C8esk=E9_znaky?=",
 		//	exp:   "České znaky",
@@ -446,11 +446,11 @@ func TestMIMEHeaderDecoding(t *testing.T) {
 		//	exp:   "Ελληνικά",
 		//},
 		//
-		//// ISO-8859-8 (Hebrew)
-		//{
-		//	input: "Subject: =?ISO-8859-8?B?5eXp6unt?=",
-		//	exp:   "עברית",
-		//},
+		// ISO-8859-8 (Hebrew)
+		{
+			input: "Subject: =?ISO-8859-8?B?5eXp6unt?=",
+			exp:   "וויךים",
+		},
 		//{
 		//	input: "Subject: =?ISO-8859-8?Q?=F9=E1=F8=E9=FA?=",
 		//	exp:   "שלרית",
@@ -512,11 +512,11 @@ func TestMIMEHeaderDecoding(t *testing.T) {
 		//	exp:   "Ellhnikά glώssa",
 		//},
 		//
-		//// Windows-1254 (Turkish)
-		//{
-		//	input: "Subject: =?WINDOWS-1254?B?VMO8cmvDp2UgRGVzdGXEn2k=?=",
-		//	exp:   "Türkçe Desteği",
-		//},
+		// Windows-1254 (Turkish)
+		{
+			input: "Subject: =?WINDOWS-1254?B?VMO8cmvDp2UgRGVzdGXEn2k=?=",
+			exp:   "TÃ¼rkÃ§e DesteÄŸi",
+		},
 		//
 		//// Windows-1255 (Hebrew)
 		//{
@@ -536,15 +536,15 @@ func TestMIMEHeaderDecoding(t *testing.T) {
 		//	exp:   "Latviešu valoda",
 		//},
 		//
-		//// KOI8-R (Russian Cyrillic)
+		// KOI8-R (Russian Cyrillic)
 		//{
 		//	input: "Subject: =?KOI8-R?B?0snFydTBztnOxc7JINDPz87J18XOyc8=?=",
 		//	exp:   "Привет русский текст",
 		//},
-		//{
-		//	input: "Subject: =?KOI8-R?Q?=D0=CB=CF=D7=CF_=D2=D5=D3=D3=CB=C9=CA?=",
-		//	exp:   "Слово русский",
-		//},
+		{
+			input: "Subject: =?KOI8-R?Q?=D0=CB=CF=D7=CF_=D2=D5=D3=D3=CB=C9=CA?=",
+			exp:   "пково русский",
+		},
 		//
 		//// KOI8-U (Ukrainian Cyrillic)
 		//{
@@ -557,10 +557,10 @@ func TestMIMEHeaderDecoding(t *testing.T) {
 		//	input: "Subject: =?SHIFT-JIS?B?k/qWe4zqg2WDjINYg2eDYJN5DA==?=",
 		//	exp:   "日本語テレストチ土",
 		//},
-		//{
-		//	input: "Subject: =?SHIFT-JIS?Q?=93=FA=96=7B=8C=EA=83=65=83=58=83=67=83=60=93=99?=",
-		//	exp:   "日本語テストです",
-		//},
+		{
+			input: "Subject: =?SHIFT-JIS?Q?=93=FA=96=7B=8C=EA=83=65=83=58=83=67=83=60=93=99?=",
+			exp:   "日本語テストチ等",
+		},
 		//
 		//// EUC-JP (Japanese)
 		//{
@@ -568,10 +568,10 @@ func TestMIMEHeaderDecoding(t *testing.T) {
 		//	exp:   "日本語テスト",
 		//},
 		//
-		//// EUC-KR (Korean)
+		// EUC-KR (Korean)
 		//{
 		//	input: "Subject: =?EUC-KR?B?sbi6z7nRwM3GrCDGyLzayer4sMkg7JWM66qF7JWE?=",
-		//	exp:   "한국어 테스트 메시지입니다",
+		//	exp:   "구북밂익튬 팔솟?楡걸 ?紐\u0085?\u0084",
 		//},
 		//
 		//// GB2312/GBK (Simplified Chinese)
