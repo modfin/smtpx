@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"github.com/modfin/smtpx/envelope"
+	"strings"
 )
 
 func check(err error) {
@@ -21,30 +22,27 @@ func main() {
 	for k, v := range headers {
 		fmt.Printf("%s: %s\n", k, v)
 	}
-	//From: [sender@example.com]
-	//To: [recipient@example.com]
-	//Subject: [Multipart Email with Spécial Chàracters]
-	//Date: [Mon, 15 May 2023 10:00:00 -0700]
-	//Mime-Version: [1.0]
-	//Content-Type: [multipart/mixed; boundary="outer-boundary"]
 
-	// Content is tree
+	// From: [sender@example.com]
+	// To: [recipient@example.com]
+	// Subject: [Multipart Email with Spécial Chàracters]
+	// Date: [Mon, 15 May 2023 10:00:00 -0700]
+	// Mime-Version: [1.0]
+	// Content-Type: [multipart/mixed; boundary="outer-boundary"]
+
+	//  Content is tree
 	content, err := mail.Body()
 	check(err)
 
-	var printTree func(content *envelope.Content, prefix string)
-	printTree = func(content *envelope.Content, prefix string) {
-		fmt.Printf("%sContent-Type: %s\n", prefix, content.Headers.Get("Content-Type"))
+	content.Walk(func(c *envelope.Content, level int) error {
 
-		if content.Leaf() {
-			fmt.Printf("%s╰ len: %d\n", prefix, len(content.Body))
+		fmt.Print(strings.Repeat("│ ", level))
+		fmt.Printf("Content-Type: %s\n", c.Headers.Get("Content-Type"))
+		if c.Leaf() {
+			fmt.Printf("%s╰ len: %d\n", strings.Repeat("│ ", level), len(c.Body))
 		}
-
-		for _, child := range content.Children {
-			printTree(&child, prefix+"│ ")
-		}
-	}
-	printTree(content, "")
+		return nil
+	})
 	// Content-Type: multipart/mixed; boundary="outer-boundary"
 	// │ Content-Type: multipart/related; boundary="related-boundary"
 	// │ │ Content-Type: multipart/alternative; boundary="inner-boundary"
@@ -56,6 +54,16 @@ func main() {
 	// │ │ ╰ len: 308
 	// │ Content-Type: application/pdf
 	// │ ╰ len: 178
+	//
+
+	// Flatten and filter things that has content, ie, all multipart parts is removed
+	for _, c := range content.Flatten() {
+		fmt.Printf("Content-Type: %s\n", c.Headers.Get("Content-Type"))
+	}
+	// Content-Type: text/plain; charset="UTF-8"
+	// Content-Type: text/html; charset="UTF-8"
+	// Content-Type: image/png
+	// Content-Type: application/pdf
 
 }
 

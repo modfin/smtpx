@@ -6,14 +6,29 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"golang.org/x/text/transform"
 	"io"
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
+	"net/mail"
 	"net/textproto"
 	"net/url"
 	"strings"
 )
+
+type Headers struct {
+	textproto.MIMEHeader
+}
+
+func (h Headers) From() (*mail.Address, error) {
+	from := h.Get("From")
+	return mail.ParseAddress(from)
+}
+func (h Headers) To() ([]*mail.Address, error) {
+	to := h.Get("To")
+	return mail.ParseAddressList(to)
+}
 
 // NewMail returns a new mail struct. It takes in a byte slice of the entire email contant. ie. header + body
 // eg
@@ -43,7 +58,7 @@ type Mail struct {
 }
 
 // Headers parses the headers from Envelope
-func (e *Mail) Headers() (textproto.MIMEHeader, error) {
+func (e *Mail) Headers() (Headers, error) {
 	headerReader := textproto.NewReader(bufio.NewReader(bytes.NewBuffer(e.RawHeaders)))
 
 	h, err := headerReader.ReadMIMEHeader()
@@ -54,7 +69,7 @@ func (e *Mail) Headers() (textproto.MIMEHeader, error) {
 	// If UTF8 is true, there should not be any need for decoding...
 	// And there are no charset endoding blocks =?charset?[b/q]?<data>?=
 	if e.UTF8 && !bytes.Contains(e.RawHeaders, []byte("=?")) {
-		return h, err
+		return Headers{h}, err
 	}
 
 	dec := &mime.WordDecoder{
@@ -73,7 +88,7 @@ func (e *Mail) Headers() (textproto.MIMEHeader, error) {
 		}
 		h[k] = vv2
 	}
-	return h, err
+	return Headers{h}, err
 }
 
 func (e *Mail) Body() (*Content, error) {
@@ -204,28 +219,71 @@ func (c *Content) Decode() ([]byte, error) {
 		charset = "utf-8"
 	}
 
-	// Todo, decode the charset...
+	var toUTF8 func(r io.Reader) io.Reader
+	toUTF8 = func(r io.Reader) io.Reader {
+		return r
+	}
+
+	if charset != "utf-8" {
+
+		m, ok := charsetEncodings[charset]
+		if !ok {
+			m, ok = charsetEncodings[charsetAliases[charset]]
+		}
+		if m != nil {
+			toUTF8 = func(r io.Reader) io.Reader {
+				return transform.NewReader(r, m.NewDecoder())
+			}
+		}
+	}
+
 	switch enc {
 
 	case "quoted-printable":
 
-		data, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(c.Body)))
-
+		data, err := io.ReadAll(toUTF8(quotedprintable.NewReader(bytes.NewReader(c.Body))))
 		return data, err
 	case "base64":
-		return base64.StdEncoding.DecodeString(string(c.Body))
+
+		data, err := base64.StdEncoding.DecodeString(string(c.Body))
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode base64: %w", err)
+		}
+
+		data, err = io.ReadAll(toUTF8(bytes.NewReader(data)))
+
+		return data, err
 	case "7bit", "8bit", "binary":
-		return c.Body, nil
+		data, err := io.ReadAll(toUTF8(bytes.NewReader(c.Body)))
+		return data, err
 	default:
 		return nil, fmt.Errorf("unknown encoding: %s", enc)
 	}
 
 }
 
+func (c *Content) Walk(fn func(*Content, int) error) error {
+	var rec func(c *Content, level int) error
+	rec = func(c *Content, level int) error {
+		if err := fn(c, level); err != nil {
+			return err
+		}
+		for _, child := range c.Children {
+
+			if err := rec(&child, level+1); err != nil {
+				return err
+			}
+
+		}
+		return nil
+	}
+	return rec(c, 0)
+}
+
 func (c *Content) Flatten() []*Content {
 
 	if c.Leaf() {
-		return []*Content{&Content{
+		return []*Content{{
 			Headers:  c.Headers,
 			Body:     c.Body,
 			Children: nil,

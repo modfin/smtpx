@@ -545,6 +545,7 @@ func TestContent_Decode(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := &Content{
 				Headers: textproto.MIMEHeader{
+					"Content-Type":              []string{"text/plain"},
 					"Content-Transfer-Encoding": []string{tt.encoding},
 				},
 				Body: tt.input,
@@ -556,6 +557,89 @@ func TestContent_Decode(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("Content.Decode() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContent_Decode_Charsets(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		encoding    string
+		input       []byte
+		expected    string
+		wantErr     bool
+	}{
+		{
+			name:        "UTF-8 with 7bit encoding",
+			contentType: "text/plain; charset=utf-8",
+			encoding:    "7bit",
+			input:       []byte("Hello, 世界"),
+			expected:    "Hello, 世界",
+		},
+		{
+			name:        "ISO-8859-1 with quoted-printable encoding",
+			contentType: "text/plain; charset=iso-8859-1",
+			encoding:    "quoted-printable",
+			input:       []byte("H=E9llo, w=F6rld"),
+			expected:    "Héllo, wörld",
+		},
+		{
+			name:        "UTF-8 with base64 encoding",
+			contentType: "text/plain; charset=utf-8",
+			encoding:    "base64",
+			input:       []byte("SGVsbG8sIHdvcmxk"),
+			expected:    "Hello, world",
+		},
+		{
+			name:        "Windows-1252 with 8bit encoding",
+			contentType: "text/plain; charset=windows-1252",
+			encoding:    "8bit",
+			input:       []byte{0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x2C, 0x20, 0xF6, 0x72, 0x6C, 0x64},
+			expected:    "Hello, örld",
+		},
+		{
+			name:        "UTF-16BE with base64 encoding",
+			contentType: "text/plain; charset=utf-16be",
+			encoding:    "base64",
+			input:       []byte("AGgAZQBsAGwAbwAsACAAdwBvAHIAbABk"),
+			expected:    "hello, world",
+		},
+		{
+			name:        "Invalid charset",
+			contentType: "text/plain; charset=invalid",
+			encoding:    "7bit",
+			input:       []byte("Hello, world"),
+			expected:    "Hello, world",
+			wantErr:     false,
+		},
+		{
+			name:        "Invalid encoding",
+			contentType: "text/plain; charset=utf-8",
+			encoding:    "invalid",
+			input:       []byte("Hello, world"),
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Content{
+				Headers: textproto.MIMEHeader{
+					"Content-Type":              {tt.contentType},
+					"Content-Transfer-Encoding": {tt.encoding},
+				},
+				Body: tt.input,
+			}
+
+			decoded, err := c.Decode()
+
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected, string(decoded))
 			}
 		})
 	}
