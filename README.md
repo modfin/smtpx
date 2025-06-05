@@ -78,11 +78,13 @@ func main() {
 				return responses.FailSyntaxError
 			}
 
-			// Parses headers canonical headers and decodes them to UTF8 in case of RFC 2047 MIME encoding
-			headers, err := mail.Headers()
+			// Parses headers while keeping encoding.
+			// For human-readable decoded format, use mail.Headers()
+			headers, err := mail.HeadersLiteral()
 
-			fmt.Println("From:", headers.Get("From"))
-			fmt.Println("To:", headers.Get("To"))
+			// Error handling ignored for brevity
+			fmt.Println("From:", headers.From())
+			fmt.Println("To:", headers.To())
 			fmt.Println("Subject:", headers.Get("Subject"))
 			fmt.Println("Body:", string(mail.Body()))
 
