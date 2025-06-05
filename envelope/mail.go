@@ -21,11 +21,15 @@ type Headers struct {
 	textproto.MIMEHeader
 }
 
-func (h Headers) From() (*mail.Address, error) {
+type RawHeaders struct {
+	textproto.MIMEHeader
+}
+
+func (h RawHeaders) From() (*mail.Address, error) {
 	from := h.Get("From")
 	return mail.ParseAddress(from)
 }
-func (h Headers) To() ([]*mail.Address, error) {
+func (h RawHeaders) To() ([]*mail.Address, error) {
 	to := h.Get("To")
 	return mail.ParseAddressList(to)
 }
@@ -57,7 +61,7 @@ type Mail struct {
 	RawBody    []byte
 }
 
-// Headers parses the headers from Envelope
+// Headers parses the headers from Envelope to a human-readable format.
 func (e *Mail) Headers() (Headers, error) {
 	headerReader := textproto.NewReader(bufio.NewReader(bytes.NewBuffer(e.RawHeaders)))
 
@@ -89,6 +93,19 @@ func (e *Mail) Headers() (Headers, error) {
 		h[k] = vv2
 	}
 	return Headers{h}, err
+}
+
+// HeadersLiteral parses the headers from Envelope without decoding the values.
+// This is more useful for e.g parsing of email addresses.
+func (e *Mail) HeadersLiteral() (RawHeaders, error) {
+	headerReader := textproto.NewReader(bufio.NewReader(bytes.NewBuffer(e.RawHeaders)))
+
+	h, err := headerReader.ReadMIMEHeader()
+	if errors.Is(err, io.EOF) {
+		err = nil
+	}
+
+	return RawHeaders{h}, err
 }
 
 func (e *Mail) Body() (*Content, error) {
