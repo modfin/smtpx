@@ -1,11 +1,12 @@
 package envelope
 
 import (
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"net/textproto"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMailBodyAndParseContent(t *testing.T) {
@@ -641,6 +642,52 @@ func TestContent_Decode_Charsets(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expected, string(decoded))
 			}
+		})
+	}
+}
+
+func TestHeadersLiteral_NotDecoding(t *testing.T) {
+	tests := []struct {
+		name            string
+		value           string
+		expectedRaw     string
+		expectedDecoded string
+		expectedEmail   string
+	}{
+		{
+			name:            "Latin1",
+			value:           "=?iso-8859-1?Q?Lastname=2C_=F6?= <o.Lastname@company.com>",
+			expectedRaw:     "=?iso-8859-1?Q?Lastname=2C_=F6?= <o.Lastname@company.com>",
+			expectedDecoded: "Lastname, ö <o.Lastname@company.com>",
+			expectedEmail:   "o.Lastname@company.com",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rawEmail := []byte(`From: ` + tt.value + `
+To: recipient@example.com
+Subject: Test Email
+Content-Type: text/plain
+
+This is a test email body.`)
+
+			m, err := NewMail(rawEmail, false)
+			require.NoError(t, err)
+
+			// Test HeadersLiteral - should not decode
+			headersLiteral, err := m.HeadersLiteral()
+			assert.NoError(t, err)
+
+			address, err := headersLiteral.From()
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedEmail, address.Address)
+
+			// Test Headers - should decode
+			headers, err := m.Headers()
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedDecoded, headers.Get("From"))
 		})
 	}
 }
