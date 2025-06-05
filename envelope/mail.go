@@ -96,7 +96,14 @@ func (e *Mail) Headers() (Headers, error) {
 }
 
 // HeadersLiteral parses the headers from Envelope without decoding the values.
-// This is more useful for e.g parsing of email addresses.
+// This is more useful for e.g. parsing of email addresses.
+//
+// Example: The following From header will give the following result in its literal and decoded form using Headers().
+// Notice that the decoded form is not a valid RFC 5322 address.
+//
+// From: =?iso-8859-1?Q?Lastname=2C_=F6?= <o.Lastname@company.com>
+// Literal: =?iso-8859-1?Q?Lastname=2C_=F6?= <o.Lastname@company.com>
+// Decoded: Lastname, ö <o.Lastname@company.com>
 func (e *Mail) HeadersLiteral() (RawHeaders, error) {
 	headerReader := textproto.NewReader(bufio.NewReader(bytes.NewBuffer(e.RawHeaders)))
 
