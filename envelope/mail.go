@@ -14,6 +14,7 @@ import (
 	"net/mail"
 	"net/textproto"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -21,15 +22,11 @@ type Headers struct {
 	textproto.MIMEHeader
 }
 
-type RawHeaders struct {
-	textproto.MIMEHeader
-}
-
-func (h RawHeaders) From() (*mail.Address, error) {
+func (h Headers) From() (*mail.Address, error) {
 	from := h.Get("From")
 	return mail.ParseAddress(from)
 }
-func (h RawHeaders) To() ([]*mail.Address, error) {
+func (h Headers) To() ([]*mail.Address, error) {
 	to := h.Get("To")
 	return mail.ParseAddressList(to)
 }
@@ -61,13 +58,53 @@ type Mail struct {
 	RawBody    []byte
 }
 
+type decodingConfig struct {
+	quoteEscapeHeaders []string
+	specials           string
+	literalHeaders     bool
+}
+type DecodingOption func(*decodingConfig)
+
+func WithQuoteEscape(headers ...string) DecodingOption {
+	return func(cfg *decodingConfig) {
+		cfg.quoteEscapeHeaders = append(cfg.quoteEscapeHeaders, headers...)
+	}
+}
+func WithQuoteNone() DecodingOption {
+	return func(cfg *decodingConfig) {
+		cfg.quoteEscapeHeaders = nil
+	}
+}
+
+// WithLiteral will not encode the headers to utf-8, just read them as MIMEHeader
+func WithLiteral() DecodingOption {
+	return func(cfg *decodingConfig) {
+		cfg.literalHeaders = true
+	}
+}
+
 // Headers parses the headers from Envelope to a human-readable format.
-func (e *Mail) Headers() (Headers, error) {
+func (e *Mail) Headers(options ...DecodingOption) (Headers, error) {
+
+	cfg := &decodingConfig{
+		literalHeaders:     false,
+		quoteEscapeHeaders: []string{"from", "to", "cc", "bcc", "reply-to", "sender"},
+		specials:           "\"#$%&'(),.:;<>@[]^`{|}~",
+	}
+
+	for _, option := range options {
+		option(cfg)
+	}
+
 	headerReader := textproto.NewReader(bufio.NewReader(bytes.NewBuffer(e.RawHeaders)))
 
 	h, err := headerReader.ReadMIMEHeader()
 	if errors.Is(err, io.EOF) {
 		err = nil
+	}
+
+	if cfg.literalHeaders {
+		return Headers{h}, err
 	}
 
 	// If UTF8 is true, there should not be any need for decoding...
@@ -80,11 +117,43 @@ func (e *Mail) Headers() (Headers, error) {
 		CharsetReader: charsetReader,
 	}
 
+	// This shit is dum. But it seems reasonable to be able to decode all headers
+	// And things containing email addresses have a special escape format for some reason
+	// RFC 5322 "quoted-string" which is not applied to headers in general
+
+	decodeWords := func(str string, quote bool) (string, error) {
+		if !quote {
+			return dec.DecodeHeader(str)
+		}
+
+		words := strings.Split(str, " ")
+		for i, part := range words {
+			words[i], err = dec.DecodeHeader(part)
+
+			if words[i] == part {
+				continue
+			}
+
+			if strings.Contains(words[i], "\"") {
+				words[i] = strings.ReplaceAll(words[i], "\"", "\\\"")
+			}
+
+			if strings.ContainsAny(words[i], cfg.specials) {
+				words[i] = "\"" + words[i] + "\""
+			}
+		}
+		return strings.Join(words, " "), err
+
+	}
+
 	// decode all headers
 	for k, vv := range h {
+
+		quote := slices.Contains(cfg.quoteEscapeHeaders, strings.ToLower(k))
+
 		var vv2 []string
 		for _, v := range vv {
-			v2, err := dec.DecodeHeader(v) // This will end up being some random endo, need to conver it to UTF8
+			v2, err := decodeWords(v, quote) // This will end up being some random endo, need to conver it to UTF8
 			if err != nil {
 				v2 = v
 			}
@@ -93,26 +162,6 @@ func (e *Mail) Headers() (Headers, error) {
 		h[k] = vv2
 	}
 	return Headers{h}, err
-}
-
-// HeadersLiteral parses the headers from Envelope without decoding the values.
-// This is more useful for e.g. parsing of email addresses.
-//
-// Example: The following From header will give the following result in its literal and decoded form using Headers().
-// Notice that the decoded form is not a valid RFC 5322 address.
-//
-// From: =?iso-8859-1?Q?Lastname=2C_=F6?= <o.Lastname@company.com>
-// Literal: =?iso-8859-1?Q?Lastname=2C_=F6?= <o.Lastname@company.com>
-// Decoded: Lastname, ö <o.Lastname@company.com>
-func (e *Mail) HeadersLiteral() (RawHeaders, error) {
-	headerReader := textproto.NewReader(bufio.NewReader(bytes.NewBuffer(e.RawHeaders)))
-
-	h, err := headerReader.ReadMIMEHeader()
-	if errors.Is(err, io.EOF) {
-		err = nil
-	}
-
-	return RawHeaders{h}, err
 }
 
 func (e *Mail) Body() (*Content, error) {

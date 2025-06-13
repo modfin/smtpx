@@ -214,10 +214,31 @@ func TestEnvelopeLargeHeader(t *testing.T) {
 func TestMIMEHeaderDecoding(t *testing.T) {
 
 	type testCase struct {
-		input string
-		exp   string
+		header string
+		input  string
+		exp    string
 	}
 	testCases := []testCase{
+		{
+			header: "to",
+			input:  "To: =?iso-8859-1?Q?Test=2C_Bj=F6rn?= =?Windows-1252?Q?S_Test=F8_-_Company?= <Bjorn.Test@company.com>",
+			exp:    `"Test, Björn" S Testø - Company <Bjorn.Test@company.com>`,
+		},
+		{
+			header: "to",
+			input:  "To: =?iso-8859-1?Q?Test=2C_Bj=F6rn?= <Bjorn.Test@company.com>, =?Windows-1252?Q?S_Test=F8_-_Company?= <s.testoe@company.com>",
+			exp:    `"Test, Björn" <Bjorn.Test@company.com>, S Testø - Company <s.testoe@company.com>`,
+		},
+		{
+			header: "to",
+			input:  "To: =?iso-8859-1?Q?Test=2C_Bj=F6rn?= <Bjorn.Test@company.com> ",
+			exp:    "\"Test, Björn\" <Bjorn.Test@company.com>",
+		},
+		{
+			header: "to",
+			input:  `To: "=?iso-8859-1?Q?Test=2C_Bj=F6rn?=" <Bjorn.Test@company.com>`,
+			exp:    `"\"Test, Björn\"" <Bjorn.Test@company.com>`,
+		},
 		// Basic UTF-8 Base64 encoded header
 		{
 			input: "Subject: =?UTF-8?B?VGVzdCB3aXRoIMOpIGFuZCDkuK3lj7g=?=",
@@ -634,7 +655,12 @@ func TestMIMEHeaderDecoding(t *testing.T) {
 			continue
 		}
 
-		decoded := headers.Get("Subject")
+		header := tc.header
+		if header == "" {
+			header = "Subject"
+		}
+
+		decoded := headers.Get(header)
 
 		if decoded != tc.exp {
 			t.Errorf("Test case %d failed:\nInput:    %s\nExpected: %s\nGot:      %s",

@@ -658,7 +658,7 @@ func TestHeadersLiteral_NotDecoding(t *testing.T) {
 			name:            "Latin1",
 			value:           "=?iso-8859-1?Q?Lastname=2C_=F6?= <o.Lastname@company.com>",
 			expectedRaw:     "=?iso-8859-1?Q?Lastname=2C_=F6?= <o.Lastname@company.com>",
-			expectedDecoded: "Lastname, ö <o.Lastname@company.com>",
+			expectedDecoded: "\"Lastname, ö\" <o.Lastname@company.com>",
 			expectedEmail:   "o.Lastname@company.com",
 		},
 	}
@@ -676,7 +676,7 @@ This is a test email body.`)
 			require.NoError(t, err)
 
 			// Test HeadersLiteral - should not decode
-			headersLiteral, err := m.HeadersLiteral()
+			headersLiteral, err := m.Headers(WithLiteral())
 			assert.NoError(t, err)
 
 			address, err := headersLiteral.From()
